@@ -1,0 +1,20 @@
+* text=auto
+
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.ts text eol=lf
+*.mjs text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.lnk text eol=lf
+Makefile text eol=lf
+
+*.BAT text eol=crlf
+*.TXT text eol=crlf
+*.ps1 text eol=crlf
+
+*.EXE binary
+*.zip binary
+*.tgz binary

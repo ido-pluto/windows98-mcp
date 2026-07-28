@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || vars.NPM_PUBLISH_ENABLED == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Use an npm CLI with trusted publishing support
+        run: npm install --global npm@^11.5.1
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=moderate
+      - name: Install pinned Open Watcom 1.9
+        shell: powershell
+        run: ./scripts/bootstrap-openwatcom.ps1 -Install
+      - name: Build and audit WIN98CTL.EXE
+        shell: powershell
+        run: ./scripts/build-guest.ps1 -Clean
+      - name: Stage Windows 98 release asset
+        shell: powershell
+        run: ./scripts/stage-release.ps1
+      - name: Publish npm package and GitHub release
+        run: npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

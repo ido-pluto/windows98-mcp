@@ -1,0 +1,326 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { parseCliArgs } from "./cli-options.js";
+import {
+  brokerIsReachable,
+  connectBroker,
+  deriveLocalAdapterToken,
+  loadBrokerConfig,
+  startBroker,
+  type Broker,
+  type BrokerConfig
+} from "./host/index.js";
+import { startStdioMcp } from "./mcp/index.js";
+import { EXPECTED_GUEST_BUILD_ID } from "./shared/build-info.js";
+import { SimulatedGuest, writeSimulatorFixture } from "./simulator/index.js";
+import { collectDiagnostics } from "./workflows/diagnostics.js";
+import { configureInstallation } from "./workflows/configure.js";
+import { runSmokeTest } from "./workflows/smoke-test.js";
+
+const cli = parseCliArgs(process.argv.slice(2));
+const command = cli.command;
+
+try {
+  switch (command) {
+    case "broker":
+      await runBroker();
+      break;
+    case "stdio":
+      await runStdio();
+      break;
+    case "configure":
+      await runConfigure();
+      break;
+    case "doctor":
+      await runDoctor();
+      break;
+    case "simulator":
+      await runSimulator();
+      break;
+    case "smoke-test":
+      await runSmoke();
+      break;
+    case "diagnostics":
+      await runDiagnostics();
+      break;
+    case "version":
+      process.stdout.write(`${await packageVersion()}\n`);
+      break;
+    case "help":
+      printHelp();
+      break;
+    default:
+      throw new Error(`UNKNOWN_COMMAND:${command}`);
+  }
+} catch (error) {
+  process.stderr.write(
+    `[win98-mcp] ${error instanceof Error ? error.message : String(error)}\n`
+  );
+  process.exitCode = 1;
+}
+
+async function runBroker(): Promise<void> {
+  const config = await loadCliConfig();
+  const broker = await startBroker(config);
+  process.stderr.write(
+    `[win98-mcp] broker listening for guest on ${config.bindHost}:${config.guestPort} and adapters on ${config.pipePath}\n`
+  );
+  await waitForShutdown(broker);
+}
+
+async function runStdio(): Promise<void> {
+  const config = await loadCliConfig();
+  try {
+    await ensureBroker(config);
+  } catch (error) {
+    process.stderr.write(
+      `[win98-mcp] broker auto-start failed; tools will report unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }\n`
+    );
+  }
+  await startStdioMcp({
+    pipePath: config.pipePath,
+    localToken: deriveLocalAdapterToken(config.psk),
+    requestTimeoutMs: 11 * 60 * 1000
+  });
+}
+
+async function runDoctor(): Promise<void> {
+  const config = await loadCliConfig();
+  await ensureBroker(config);
+  const client = await connectBroker({
+    pipePath: config.pipePath,
+    localToken: deriveLocalAdapterToken(config.psk),
+    sessionLabel: `doctor:${process.pid}`,
+    requestTimeoutMs: 10_000
+  });
+  try {
+    const [status, capabilities] = await Promise.all([
+      client.call("vm_status", {}, 10_000),
+      client.call("vm_capabilities", {}, 10_000)
+    ]);
+    const result = {
+      ok: status.result.ok && capabilities.result.ok,
+      broker: {
+        pipePath: config.pipePath,
+        guestListener: `${config.bindHost}:${config.guestPort}`
+      },
+      status: status.result,
+      capabilities: capabilities.result,
+      copyRequired:
+        status.result.connection.state !== "online"
+          ? "WIN98CTL.INI (verify host/port/PSK first)"
+          : status.result.connection.guestBuildId !== EXPECTED_GUEST_BUILD_ID &&
+              status.result.connection.guestBuildId !== "simulator-1"
+            ? "WIN98CTL.EXE and package"
+            : "nothing",
+      nextStep:
+        status.result.connection.state === "online"
+          ? "Run win98-mcp smoke-test."
+          : "Copy the staged VM drop, run RUNTEST.BAT in Windows 98, and retry doctor."
+    };
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (!result.ok) process.exitCode = 2;
+  } finally {
+    client.close();
+  }
+}
+
+async function runConfigure(): Promise<void> {
+  const guestDirectory = configureGuestDirectory(cli.commandArgs);
+  const result = await configureInstallation({
+    workspaceRoot: process.cwd(),
+    guestDirectory,
+    ...(cli.configPath ? { configPath: cli.configPath } : {}),
+    ...(cli.overrides.bindHost ? { bindHost: cli.overrides.bindHost } : {}),
+    ...(cli.overrides.expectedGuestIp
+      ? { expectedGuestIp: cli.overrides.expectedGuestIp }
+      : {}),
+    ...(cli.overrides.guestPort
+      ? { guestPort: cli.overrides.guestPort }
+      : {}),
+    ...(cli.overrides.stateDir ? { stateDir: cli.overrides.stateDir } : {}),
+    ...(cli.overrides.hostAllowedRoots
+      ? { hostAllowedRoots: cli.overrides.hostAllowedRoots }
+      : {})
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
+async function runSimulator(): Promise<void> {
+  const config = await loadCliConfig();
+  await ensureBroker(config);
+  const rootDirectory = path.join(config.stateDir, "simulator-root");
+  await writeSimulatorFixture(rootDirectory);
+  const simulator = new SimulatedGuest({
+    host: config.bindHost,
+    port: config.guestPort,
+    psk: config.psk,
+    rootDirectory
+  });
+  simulator.on("authenticated", () => {
+    process.stderr.write("[win98-mcp] simulated Windows 98 guest connected\n");
+  });
+  simulator.on("protocolError", (error) => {
+    process.stderr.write(`[win98-mcp] simulator protocol error: ${String(error)}\n`);
+  });
+  await simulator.start();
+  await waitForSignals(async () => simulator.stop());
+}
+
+async function runSmoke(): Promise<void> {
+  const config = await loadCliConfig();
+  await ensureBroker(config);
+  const report = await runSmokeTest(config);
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (!report.ok) process.exitCode = 2;
+}
+
+async function runDiagnostics(): Promise<void> {
+  const config = await loadCliConfig();
+  const requested = cli.commandArgs[0];
+  const outputDirectory =
+    requested ?? path.join(config.stateDir, `diagnostics-${Date.now()}`);
+  const result = await collectDiagnostics(config, outputDirectory);
+  process.stdout.write(`${result}\n`);
+}
+
+async function ensureBroker(config: BrokerConfig): Promise<void> {
+  if (await brokerIsReachable(config.pipePath)) return;
+  const entry = process.argv[1];
+  if (!entry) throw new Error("CLI_ENTRYPOINT_UNKNOWN");
+  const child = spawn(
+    process.execPath,
+    [...process.execArgv, entry, "broker", ...cli.configArgs],
+    {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+      windowsHide: true
+    }
+  );
+  child.unref();
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await brokerIsReachable(config.pipePath, 200)) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("BROKER_START_TIMEOUT");
+}
+
+async function loadCliConfig(): Promise<BrokerConfig> {
+  let configPath = cli.configPath ?? process.env["WIN98_MCP_CONFIG"];
+  if (!configPath) {
+    const projectConfig = path.resolve(".win98-mcp", "config.json");
+    try {
+      await access(projectConfig);
+      configPath = projectConfig;
+    } catch {
+      // Environment-only configuration remains supported.
+    }
+  }
+  return await loadBrokerConfig({
+    ...(configPath ? { configPath } : {}),
+    overrides: cli.overrides
+  });
+}
+
+async function waitForShutdown(broker: Broker): Promise<void> {
+  await waitForSignals(async () => broker.stop());
+}
+
+async function waitForSignals(cleanup: () => Promise<void>): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let stopping = false;
+    const stop = (): void => {
+      if (stopping) return;
+      stopping = true;
+      void cleanup().finally(resolve);
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
+function printHelp(): void {
+  process.stdout.write(`Windows 98 Remote-Control MCP
+
+Usage: windows98-mcp [command] [options]
+
+With no command, the stdio MCP adapter starts for npx-based MCP clients.
+
+  broker              Run the long-lived host broker
+  stdio               Run the Codex stdio MCP adapter
+  configure           Write matching host and downloaded-guest configuration
+  doctor              Check broker, guest, and negotiated capabilities
+  simulator           Run the deterministic simulated Windows 98 guest
+  smoke-test          Exercise the connected guest safely
+  diagnostics [dir]   Collect sanitized diagnostics
+
+Network and configuration options:
+  --ip <guest-ip>     Only accept the Windows 98 guest at this IPv4 address
+  --bind <host-ip>    Listen on this host-only adapter address
+  --port <port>       Guest listener port (default: 9898)
+  --config <file>     Load a broker JSON configuration file
+  --state-dir <dir>   Store logs and artifacts in this directory
+  --host-root <dir>   Allow file transfers beneath this host root (repeatable)
+
+Examples:
+  npx windows98-mcp --ip 192.168.60.128
+  npx windows98-mcp configure --bind 192.168.60.1 --ip 192.168.60.128 --guest-dir C:\\WIN98CTL
+  npx windows98-mcp doctor --ip 192.168.60.128
+`);
+}
+
+function configureGuestDirectory(args: string[]): string {
+  let guestDirectory: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === "--guest-dir") {
+      const value = args[++index];
+      if (!value) throw new Error("CLI_VALUE_REQUIRED:--guest-dir");
+      guestDirectory = value;
+      continue;
+    }
+    if (token?.startsWith("--guest-dir=")) {
+      guestDirectory = token.slice("--guest-dir=".length);
+      continue;
+    }
+    throw new Error(`CLI_UNKNOWN_CONFIGURE_OPTION:${token}`);
+  }
+  if (!guestDirectory) throw new Error("CLI_VALUE_REQUIRED:--guest-dir");
+  return guestDirectory;
+}
+
+async function findPackageRoot(): Promise<string> {
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(moduleDirectory, ".."),
+    path.resolve(moduleDirectory, "../..")
+  ];
+  for (const candidate of candidates) {
+    try {
+      await Promise.all([
+        access(path.join(candidate, "package.json"))
+      ]);
+      return candidate;
+    } catch {
+      // Try the compiled and source layouts in turn.
+    }
+  }
+  throw new Error("PACKAGE_ROOT_NOT_FOUND");
+}
+
+async function packageVersion(): Promise<string> {
+  const root = await findPackageRoot();
+  const manifest = JSON.parse(
+    await readFile(path.join(root, "package.json"), "utf8")
+  ) as { version?: string };
+  return manifest.version ?? "unknown";
+}

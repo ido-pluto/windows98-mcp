@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: Host (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=moderate
+
+  windows-98-guest:
+    name: Windows 98 guest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install pinned Open Watcom 1.9
+        shell: powershell
+        run: ./scripts/bootstrap-openwatcom.ps1 -Install
+      - name: Build and audit WIN98CTL.EXE
+        shell: powershell
+        run: ./scripts/build-guest.ps1 -Clean
+      - run: npm run build
+      - run: npm pack --dry-run
+      - name: Stage release asset
+        shell: powershell
+        run: ./scripts/stage-release.ps1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows98-mcp-guest
+          path: |
+            out/release/windows98-mcp-guest.zip
+            out/release/windows98-mcp-guest.zip.sha256
+          if-no-files-found: error

@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+out/
+.win98-mcp/
+.codex/
+.env
+.env.*
+*.log
+*.zip
+*.tgz
+guest/build/
+guest/probe/
+toolchains/
+.toolchains/
+guest/dist/

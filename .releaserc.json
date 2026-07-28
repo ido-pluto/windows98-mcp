@@ -1,0 +1,35 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/npm",
+      {
+        "tarballDir": "out/release"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          {
+            "path": "out/release/windows98-mcp-guest.zip",
+            "label": "Windows 98 guest agent"
+          },
+          {
+            "path": "out/release/windows98-mcp-guest.zip.sha256",
+            "label": "Windows 98 guest SHA-256"
+          },
+          {
+            "path": "out/release/windows98-mcp-*.tgz",
+            "label": "npm package tarball"
+          }
+        ],
+        "successComment": false,
+        "failComment": false
+      }
+    ]
+  ]
+}

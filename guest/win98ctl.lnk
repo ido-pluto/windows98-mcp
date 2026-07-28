@@ -1,0 +1,14 @@
+system win95
+option quiet
+option eliminate
+option map=dist\WIN98CTL.map
+option stack=65536
+name dist\WIN98CTL.EXE
+file build\win98ctl.obj
+file build\protocol.obj
+file build\sha256.obj
+library kernel32.lib
+library user32.lib
+library gdi32.lib
+library advapi32.lib
+library ws2_32.lib
