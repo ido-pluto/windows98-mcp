@@ -187,10 +187,11 @@ and permits imports only from Windows 98 system DLLs.
 ## Package contents
 
 The npm package contains only the compiled TypeScript host MCP under
-`dist/src`, its bundled MCP runtime dependency, `README.md`, and `LICENSE`. It
-does **not** contain guest C sources, PowerShell build scripts, toolchains, or
-`WIN98CTL.EXE`. The executable is built by the Windows GitHub Actions release
-job and distributed only in `windows98-mcp-guest.zip` on GitHub Releases.
+`dist/src`, `package.json`, `README.md`, and `LICENSE`; npm installs its declared
+runtime dependencies normally. It does **not** contain bundled `node_modules`,
+guest C sources, PowerShell build scripts, toolchains, or `WIN98CTL.EXE`. The
+executable is built by the Windows GitHub Actions release job and distributed
+only in `windows98-mcp-guest.zip` on GitHub Releases.
 
 ## Releases
 
