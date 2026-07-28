@@ -620,10 +620,6 @@ export class TransferCoordinator {
     if (rootInfo.isSymbolicLink()) {
       throw new Error("HOST_ALLOWED_ROOT_IS_SYMLINK");
     }
-    const realRoot = await realpath(root);
-    if (!samePath(realRoot, root)) {
-      throw new Error("HOST_ALLOWED_ROOT_CONTAINS_SYMLINK");
-    }
     const relativePath = relative(root, candidate);
     let current = root;
     for (const part of relativePath.split(sep).filter(Boolean)) {
@@ -1016,14 +1012,6 @@ function validateGuestEntryName(name: string): void {
 function isWithin(root: string, candidate: string): boolean {
   const result = relative(resolve(root), resolve(candidate));
   return result === "" || (!result.startsWith(`..${sep}`) && result !== ".." && !isAbsolute(result));
-}
-
-function samePath(left: string, right: string): boolean {
-  const normalizedLeft = resolve(left).replace(/[\\/]+$/u, "");
-  const normalizedRight = resolve(right).replace(/[\\/]+$/u, "");
-  return process.platform === "win32"
-    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-    : normalizedLeft === normalizedRight;
 }
 
 function emptyProgress(
