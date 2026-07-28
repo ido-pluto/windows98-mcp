@@ -15,7 +15,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.3.1"
+#define BUILD_ID "win98ctl-0.3.2"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
@@ -25,6 +25,7 @@
 #define IDLE_SLEEP 20
 #define HANDSHAKE_TIMEOUT_MS 15000UL
 #define CONTROL_IDLE_TIMEOUT_MS 45000UL
+#define RECONNECT_DELAY_MS 2000UL
 #define ID_CLOSE_BUTTON 1001
 #define WM_AGENT_STATUS (WM_USER+1)
 #define WM_AGENT_WORKER_DONE (WM_USER+2)
@@ -735,9 +736,9 @@ static int install_startup(void) {
     if(r==ERROR_SUCCESS){r=RegSetValueExA(k,"WIN98CTL",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
 }
 static int self_test(void) {
-    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],*slash,hx[65];FILE*f,*tf;unsigned char*d,digest[32],pipebuf[1024];unsigned long n,total,start;int ok=1;SHELL_SESSION*s;
+    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],*slash,hx[65];FILE*f,*tf;unsigned char*d,digest[32],pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
     strcpy(dir,cfg.ini_path);slash=strrchr(dir,'\\');if(slash)*slash=0;if(!safe_format(path,MAX_PATH,"%s\\SELFTEST.TXT",dir,0))return 2;f=fopen(path,"w");if(!f)return 2;
-    fprintf(f,"WIN98CTL %s SELF TEST\r\n",BUILD_ID);fprintf(f,"Configuration: PASS\r\n");if(WSAStartup(MAKEWORD(2,0),&wd)){fprintf(f,"Winsock 2: FAIL (WSAStartup rejected version 2.0)\r\n");ok=0;}else{if(LOBYTE(wd.wVersion)<2){fprintf(f,"Winsock 2: FAIL (provider returned version %u.%u)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion));ok=0;}else fprintf(f,"Winsock 2: PASS %u.%u (%s)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion),wd.szDescription);WSACleanup();}
+    reconnect_delay=RECONNECT_DELAY_MS;fprintf(f,"WIN98CTL %s SELF TEST\r\n",BUILD_ID);fprintf(f,"Configuration: PASS\r\n");fprintf(f,"Reconnect interval: %s (%lu ms)\r\n",reconnect_delay==2000UL?"PASS":"FAIL",reconnect_delay);if(reconnect_delay!=2000UL)ok=0;if(WSAStartup(MAKEWORD(2,0),&wd)){fprintf(f,"Winsock 2: FAIL (WSAStartup rejected version 2.0)\r\n");ok=0;}else{if(LOBYTE(wd.wVersion)<2){fprintf(f,"Winsock 2: FAIL (provider returned version %u.%u)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion));ok=0;}else fprintf(f,"Winsock 2: PASS %u.%u (%s)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion),wd.szDescription);WSACleanup();}
     d=capture_bmp(0,0,64,64,0,&n);fprintf(f,"GDI capture: %s (%lu bytes)\r\n",d?"PASS":"FAIL",d?n:0);if(!d)ok=0;free(d);
     w98_hmac_sha256((w98_u8*)"key",3,"The quick brown fox jumps over the lazy dog",43,0,0,0,0,digest);w98_hex(digest,32,hx);
     fprintf(f,"HMAC-SHA256: %s\r\n",!strcmp(hx,"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")?"PASS":"FAIL");
@@ -751,15 +752,15 @@ static int self_test(void) {
 }
 
 static DWORD WINAPI agent_network_thread(LPVOID parameter) {
-    WSADATA wd;SOCKET s;struct sockaddr_in sa;struct hostent*he;int delay=1000,startup_result,authenticated,keepalive=1,socket_timeout=(int)CONTROL_IDLE_TIMEOUT_MS,winsock_started=0;unsigned long reconnect_wait;char line[192];
+    WSADATA wd;SOCKET s;struct sockaddr_in sa;struct hostent*he;int startup_result,keepalive=1,socket_timeout=(int)CONTROL_IDLE_TIMEOUT_MS,winsock_started=0;char line[192];
     (void)parameter;
-    for(;;){if(agent_stop_requested())goto network_done;startup_result=WSAStartup(MAKEWORD(2,0),&wd);if(!startup_result&&LOBYTE(wd.wVersion)>=2){winsock_started=1;break;}if(!startup_result)WSACleanup();log_line("Winsock 2 is unavailable; retrying initialization in 5 seconds");set_agent_status("Winsock 2 unavailable; retrying...");if(wait_for_agent_stop(5000))goto network_done;}
-    log_line("agent starting with persistent reconnect enabled");
-    for(;;){if(agent_stop_requested())break;authenticated=0;s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s!=INVALID_SOCKET){set_agent_socket(s);setsockopt(s,SOL_SOCKET,SO_KEEPALIVE,(char*)&keepalive,sizeof(keepalive));setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));memset(&sa,0,sizeof(sa));sa.sin_family=AF_INET;sa.sin_port=htons(cfg.port);sa.sin_addr.s_addr=inet_addr(cfg.host);
+    for(;;){if(agent_stop_requested())goto network_done;startup_result=WSAStartup(MAKEWORD(2,0),&wd);if(!startup_result&&LOBYTE(wd.wVersion)>=2){winsock_started=1;break;}if(!startup_result)WSACleanup();log_line("Winsock 2 is unavailable; retrying initialization in 2 seconds");set_agent_status("Winsock 2 unavailable; retrying in 2 seconds...");if(wait_for_agent_stop(RECONNECT_DELAY_MS))goto network_done;}
+    log_line("agent starting with persistent 2-second reconnect enabled");
+    for(;;){if(agent_stop_requested())break;s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s!=INVALID_SOCKET){set_agent_socket(s);setsockopt(s,SOL_SOCKET,SO_KEEPALIVE,(char*)&keepalive,sizeof(keepalive));setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));memset(&sa,0,sizeof(sa));sa.sin_family=AF_INET;sa.sin_port=htons(cfg.port);sa.sin_addr.s_addr=inet_addr(cfg.host);
       sprintf(line,"Connecting to %s:%u...",cfg.host,(unsigned int)cfg.port);set_agent_status(line);
       if(sa.sin_addr.s_addr==INADDR_NONE){he=gethostbyname(cfg.host);if(he)memcpy(&sa.sin_addr,he->h_addr,he->h_length);else log_winsock_error("host name resolution failed");}
-      if(!agent_stop_requested()&&connect(s,(struct sockaddr*)&sa,sizeof(sa))==0){log_line("TCP connected");set_agent_status("TCP connected; authenticating...");authenticated=authenticated_loop(s);if(authenticated)delay=1000;}else if(!agent_stop_requested())log_winsock_error("TCP connect failed");close_agent_socket(s);}else log_winsock_error("socket creation failed");
-      cleanup_input();cleanup_sessions();cleanup_transfers();if(agent_stop_requested())break;reconnect_wait=(unsigned long)delay+(GetTickCount()%1000UL);if(reconnect_wait>30000UL)reconnect_wait=30000UL;sprintf(line,"Disconnected; retrying in %lu second%s",(reconnect_wait+999UL)/1000UL,reconnect_wait>1000UL?"s":"");set_agent_status(line);sprintf(line,"reconnect scheduled in %lu milliseconds",reconnect_wait);log_line(line);if(wait_for_agent_stop(reconnect_wait))break;if(!authenticated&&delay<30000)delay*=2;if(delay>30000)delay=30000;}
+      if(!agent_stop_requested()&&connect(s,(struct sockaddr*)&sa,sizeof(sa))==0){log_line("TCP connected");set_agent_status("TCP connected; authenticating...");authenticated_loop(s);}else if(!agent_stop_requested())log_winsock_error("TCP connect failed");close_agent_socket(s);}else log_winsock_error("socket creation failed");
+      cleanup_input();cleanup_sessions();cleanup_transfers();if(agent_stop_requested())break;set_agent_status("Disconnected; retrying in 2 seconds");log_line("reconnect scheduled in 2000 milliseconds");if(wait_for_agent_stop(RECONNECT_DELAY_MS))break;}
 network_done:
     interrupt_agent_socket();control_socket=INVALID_SOCKET;cleanup_input();cleanup_sessions();cleanup_transfers();if(winsock_started)WSACleanup();log_line("agent stopped");set_agent_status("Stopped");if(agent_main_window)PostMessageA(agent_main_window,WM_AGENT_WORKER_DONE,0,0);return 0;
 }

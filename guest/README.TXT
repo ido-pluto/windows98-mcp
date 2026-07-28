@@ -8,7 +8,7 @@ but is NOT encrypted. Do not expose TCP port 9898 to a public network.
 
 FIRST TEST
 ----------
-This package must identify itself as win98ctl-0.3.1 in SELFTEST.TXT. It was
+This package must identify itself as win98ctl-0.3.2 in SELFTEST.TXT. It was
 rebuilt with official Open Watcom 1.9 only after the separate Windows 98
 loader/API and C run-time probes both passed. SHA256.TXT identifies the exact
 files in this package.
@@ -21,6 +21,10 @@ files in this package.
    A small status window remains open and provides the Close button.
 5. Run the host smoke test.
 6. Only after reconnect testing succeeds, run INSTALL.BAT to enable startup.
+
+The agent retries the host connection every 2 seconds forever until it connects
+or you close the agent. This fixed retry interval also applies when Winsock 2
+initialization temporarily fails.
 
 SECRET HANDLING AND ROTATION
 ----------------------------

@@ -76,8 +76,8 @@ Then:
 4. After the smoke test passes, run `INSTALL.BAT` in Windows 98 to start the
    guest agent at login.
 
-The guest retries forever with jittered exponential backoff when the broker is
-offline or restarted.
+The guest retries every two seconds forever when the broker is offline or
+restarted.
 
 ## MCP client configuration
 
