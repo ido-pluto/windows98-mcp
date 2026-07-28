@@ -184,36 +184,6 @@ The test suite includes deterministic protocol, broker, MCP, lease, transfer,
 artifact, and input tests. The guest build audits the PE32 GUI subsystem (4.0)
 and permits imports only from Windows 98 system DLLs.
 
-## Package contents
-
-The npm package contains only the compiled TypeScript host MCP under
-`dist/src`, `package.json`, `README.md`, and `LICENSE`; npm installs its declared
-runtime dependencies normally. It does **not** contain bundled `node_modules`,
-guest C sources, PowerShell build scripts, toolchains, or `WIN98CTL.EXE`. The
-executable is built by the Windows GitHub Actions release job and distributed
-only in `windows98-mcp-guest.zip` on GitHub Releases.
-
-## Releases
-
-Commits on `main` use Conventional Commits. `fix:` produces a patch release,
-`feat:` a minor release, and `BREAKING CHANGE:` a major release.
-Semantic Release publishes `windows98-mcp` to npm, creates the GitHub release,
-and attaches the Windows 98 guest ZIP and checksum after all host and guest
-checks pass.
-
-Because the source repository is private, npm provenance is disabled: npm does
-not support provenance attestations from private repositories. Publishing uses
-npm trusted publishing with GitHub Actions OIDC and does not require a
-long-lived npm token.
-
-After `release.yml` is configured as the package's trusted GitHub Actions
-publisher on npm, releases run automatically for qualifying commits pushed to
-`main`. Maintainers can also dispatch the same workflow manually.
-
-Repository topics / npm keywords: `mcp`, `model-context-protocol`, `windows-98`,
-`windows98`, `remote-control`, `virtual-machine`, `automation`, `codex`, and
-`legacy-windows`.
-
 ## Limitations
 
 Windows 98 has no ConPTY, so terminals use redirected pipes rather than a true
