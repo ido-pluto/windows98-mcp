@@ -206,10 +206,9 @@ not support provenance attestations from private repositories. Publishing uses
 npm trusted publishing with GitHub Actions OIDC and does not require a
 long-lived npm token.
 
-For the first release, the maintainer configures `release.yml` as the trusted
-GitHub Actions publisher on npm and sets the repository variable
-`NPM_PUBLISH_ENABLED=true`. Until then, release jobs triggered by pushes are
-safely skipped; a manual workflow dispatch can still be used for validation.
+After `release.yml` is configured as the package's trusted GitHub Actions
+publisher on npm, releases run automatically for qualifying commits pushed to
+`main`. Maintainers can also dispatch the same workflow manually.
 
 Repository topics / npm keywords: `mcp`, `model-context-protocol`, `windows-98`,
 `windows98`, `remote-control`, `virtual-machine`, `automation`, `codex`, and

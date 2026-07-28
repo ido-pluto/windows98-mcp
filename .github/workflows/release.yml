@@ -15,7 +15,6 @@ permissions:
 
 jobs:
   release:
-    if: github.event_name == 'workflow_dispatch' || vars.NPM_PUBLISH_ENABLED == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
