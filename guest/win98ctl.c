@@ -15,7 +15,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.3.2"
+#define BUILD_ID "win98ctl-0.3.3"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
@@ -645,9 +645,31 @@ static char *dispatch(const char*method,const char*j) {
     return error_result("METHOD_NOT_FOUND","Guest does not implement this method");
 }
 
-static int send_cooperative_response(unsigned long stream,const char*request_id,const char*result) {
-    char escaped[256],*response;int ok;json_escape(request_id,escaped,sizeof(escaped));response=(char*)malloc(strlen(result)+strlen(escaped)+80);if(!response)return 0;
-    sprintf(response,"{\"kind\":\"response\",\"requestId\":\"%s\",%s",escaped,result+1);ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response),control_key,"guest-to-host");free(response);return ok;
+/* The broker requires a single JSON object containing kind/requestId plus the
+ * operation result fields.  Never splice an arbitrary or empty object after a
+ * trailing comma: that emits malformed JSON and makes a write operation's
+ * outcome unknowable to the host. */
+static int result_is_response_object(const char*result) {
+    unsigned long n;
+    if(!result)return 0;
+    n=strlen(result);
+    return n>2&&result[0]=='{'&&result[n-1]=='}'&&strstr(result,"\"ok\":")&&strstr(result,"\"code\":")&&strstr(result,"\"message\":");
+}
+static char* build_response_json(const char*method,const char*request_id,const char*result) {
+    static const char fallback[]="{\"ok\":false,\"code\":\"RESPONSE_CONSTRUCTION_FAILED\",\"message\":\"Guest rejected an invalid internal response\",\"data\":{}}";
+    char escaped[256],line[320],*response;const char*safe=result;unsigned long n,first,last,cap;
+    n=safe?(unsigned long)strlen(safe):0;first=n?(unsigned char)safe[0]:0;last=n?(unsigned char)safe[n-1]:0;
+    if(!result_is_response_object(safe))safe=fallback;
+    _snprintf(line,sizeof(line),"response method=%s len=%lu first=%02lX last=%02lX valid=%s",method&&method[0]?method:"?",n,first,last,safe==result?"yes":"no");line[sizeof(line)-1]=0;log_line(line);
+    json_escape(request_id?request_id:"",escaped,sizeof(escaped));cap=(unsigned long)strlen(safe)+(unsigned long)strlen(escaped)+80;
+    response=(char*)malloc(cap);if(!response)return 0;
+    if(_snprintf(response,cap,"{\"kind\":\"response\",\"requestId\":\"%s\",%s",escaped,safe+1)<0){free(response);return 0;}
+    return response;
+}
+static int send_cooperative_response(unsigned long stream,const char*method,const char*request_id,const char*result) {
+    char*response=build_response_json(method,request_id,result);int ok;
+    if(!response)return 0;
+    ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response),control_key,"guest-to-host");free(response);return ok;
 }
 static int cooperative_stop(void) {
     int ready;W98_FRAME f;w98_u8*payload,mac[32];char method[128],rid[128];char*result;
@@ -661,7 +683,7 @@ static int cooperative_stop(void) {
       if(f.type==W98_F_REQUEST){method[0]=rid[0]=0;json_string((char*)payload,"method",method,sizeof(method));json_string((char*)payload,"requestId",rid,sizeof(rid));
         if(!strcmp(method,"session_abort")||!strcmp(method,"sanitize")){control_aborted=1;cleanup_input();cleanup_sessions();cleanup_transfers();result=ok_data("{\"sanitized\":true}");}
         else result=error_result("VM_BUSY","A guest operation is already in progress");
-        free(payload);if(!result||!send_cooperative_response(f.stream_id,rid,result)){free(result);control_dead=1;break;}free(result);continue;
+        free(payload);if(!send_cooperative_response(f.stream_id,method,rid,result)){free(result);control_dead=1;break;}free(result);continue;
       }
       free(payload);
     }
@@ -694,7 +716,7 @@ static void log_winsock_error(const char*message) {
 }
 
 static int authenticated_loop(SOCKET s) {
-    w98_u8 gn[32],hn[32],key[32],proof[32],mac[32],*payload,*raw;char *b64,*proof64,htext[80],json[4096],rid[128],method[128],erid[256],guest_text[385],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;int was_authenticated=0;
+    w98_u8 gn[32],hn[32],key[32],proof[32],mac[32],*payload,*raw;char *b64,*proof64,htext[80],json[4096],rid[128],method[128],guest_text[385],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;int was_authenticated=0;
     json_escape(cfg.guest_id,guest_text,sizeof(guest_text));random_bytes(gn,32);b64=base64_encode(gn,32);if(!b64)return 0;sprintf(json,"{\"kind\":\"guest_hello\",\"guestNonce\":\"%s\",\"guestId\":\"%s\",\"guestBuildId\":\"%s\"}",b64,guest_text,BUILD_ID);free(b64);
     if(!w98_send_frame(s,W98_F_HELLO,0,0,0,0,json,strlen(json),0,0)||!receive_frame_with_timeout(s,&f,&payload,mac,HANDSHAKE_TIMEOUT_MS))return 0;
     if(f.type!=W98_F_CHALLENGE||!json_string((char*)payload,"hostNonce",htext,sizeof(htext))){free(payload);return 0;}
@@ -714,7 +736,7 @@ static int authenticated_loop(SOCKET s) {
       if(f.type!=W98_F_REQUEST){free(payload);continue;}control_cancelled=control_aborted=0;rid[0]=method[0]=0;json_string((char*)payload,"requestId",rid,sizeof(rid));json_string((char*)payload,"method",method,sizeof(method));result=dispatch(method,(char*)payload);free(payload);if(result&&strstr(result,"\"ok\":false"))cleanup_input();
       if(pending_binary){for(off=0;off<pending_binary_len;off+=chunk){chunk=pending_binary_len-off;if(chunk>W98_MAX_DATA)chunk=W98_MAX_DATA;if(!w98_send_frame(s,W98_F_DATA,(off+chunk==pending_binary_len)?1:0,pending_binary_stream,control_tx_sequence++,0,pending_binary+off,chunk,key,"guest-to-host")){free(pending_binary);pending_binary=0;goto connection_end;}}free(pending_binary);pending_binary=0;pending_binary_len=0;}
       if(!result)result=error_result("OUT_OF_MEMORY","Guest could not allocate an operation result");if(!result)break;
-      json_escape(rid,erid,sizeof(erid));resp=(char*)malloc(strlen(result)+strlen(erid)+80);if(!resp){free(result);break;}sprintf(resp,"{\"kind\":\"response\",\"requestId\":\"%s\",%s",erid,result+1);free(result);
+      resp=build_response_json(method,rid,result);free(result);if(!resp)break;
       if(!w98_send_frame(s,W98_F_RESPONSE,0,f.stream_id,control_tx_sequence++,0,resp,strlen(resp),key,"guest-to-host")){free(resp);break;}free(resp);
     }
 connection_end:

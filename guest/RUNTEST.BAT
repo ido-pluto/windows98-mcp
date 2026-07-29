@@ -1,4 +1,4 @@
-@ECHO OFF
+REM Keep each command visible in COMMAND.COM for guest-side troubleshooting.
 ECHO Running WIN98CTL self-test...
 IF EXIST SELFTEST.TXT DEL SELFTEST.TXT
 START /WAIT WIN98CTL.EXE --self-test

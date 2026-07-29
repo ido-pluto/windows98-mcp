@@ -8,7 +8,7 @@ but is NOT encrypted. Do not expose TCP port 9898 to a public network.
 
 FIRST TEST
 ----------
-This package must identify itself as win98ctl-0.3.2 in SELFTEST.TXT. It was
+This package must identify itself as win98ctl-0.3.3 in SELFTEST.TXT. It was
 rebuilt with official Open Watcom 1.9 only after the separate Windows 98
 loader/API and C run-time probes both passed. SHA256.TXT identifies the exact
 files in this package.
