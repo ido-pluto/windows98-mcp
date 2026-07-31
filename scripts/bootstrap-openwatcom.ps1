@@ -17,8 +17,23 @@ New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 if (-not $InstallerPath) {
     $InstallerPath = Join-Path $Destination $assetName
     if (-not (Test-Path -LiteralPath $InstallerPath)) {
-        Write-Host "Downloading the pinned official Open Watcom 1.9 installer..."
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $InstallerPath
+        $partial = "$InstallerPath.partial"
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+        Write-Host "Downloading the pinned official Open Watcom 1.9 installer (bounded retries)..."
+        $downloaded = $false
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & curl.exe --fail --location --retry 2 --retry-all-errors --connect-timeout 20 --max-time 600 --output $partial $downloadUrl
+            if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $partial)) {
+                Move-Item -LiteralPath $partial -Destination $InstallerPath -Force
+                $downloaded = $true
+                break
+            }
+            Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+        if (-not $downloaded) {
+            throw "Open Watcom download failed after three bounded attempts: $downloadUrl"
+        }
     }
 }
 $InstallerPath = [IO.Path]::GetFullPath($InstallerPath)
