@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const isWindows = process.platform === "win32";
+const isMac = process.platform === "darwin";
 const sidecarName = isWindows ? "windows98-mcp-broker.exe" : "windows98-mcp-broker";
 const output = resolve(
   process.argv[2] ??
@@ -45,7 +46,22 @@ if (sea.status !== 0) throw new Error("Node SEA blob generation failed");
 
 await copyFile(process.execPath, output);
 if (!isWindows) await chmod(output, 0o755);
+if (isMac) {
+  // Node's official SEA process requires removing the signature before
+  // postject changes the Mach-O file, then signing it again after injection.
+  const removed = spawnSync("codesign", ["--remove-signature", output], {
+    stdio: "inherit"
+  });
+  if (removed.status !== 0) throw new Error("Could not remove the macOS Node signature before SEA injection");
+}
 await inject(output, "NODE_SEA_BLOB", await readFile(resolve(work, "broker.blob")), {
-  sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"
+  sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
+  ...(isMac ? { machoSegmentName: "NODE_SEA" } : {})
 });
+if (isMac) {
+  const signed = spawnSync("codesign", ["--sign", "-", output], {
+    stdio: "inherit"
+  });
+  if (signed.status !== 0) throw new Error("Could not sign the macOS SEA sidecar");
+}
 console.log(`Broker sidecar built: ${output}`);
