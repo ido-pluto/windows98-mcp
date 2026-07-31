@@ -82,7 +82,11 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
-      - run: npm ci --prefix admin
+      # Tauri and Vite publish platform-specific optional packages.  npm's
+      # platform-local lockfile pruning makes a clean `npm ci` reject a lock
+      # generated on a different release target, so resolve these optional
+      # packages for the native runner before building the portable archive.
+      - run: npm install --prefix admin --ignore-scripts
       - run: npm run build
       - name: Build portable Windows admin archive
         if: matrix.platform == 'windows'
