@@ -125,7 +125,9 @@ jobs:
           cp -R "$app" "$stage/"
           # Tauri copies declared resources beneath Contents/Resources/resources.
           # The portable layout also provides the direct location used at runtime.
-          cp -R admin/src-tauri/resources/broker-sidecar "$stage"/*/Contents/Resources/broker-sidecar
+          bundled_app="$stage/$(basename "$app")"
+          mkdir -p "$bundled_app/Contents/Resources"
+          cp -R admin/src-tauri/resources/broker-sidecar "$bundled_app/Contents/Resources/broker-sidecar"
           cp admin/README.md "$stage/README.TXT"
           ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
           hash="$(shasum -a 256 "out/release/$ADMIN_ARTIFACT.zip" | awk '{print $1}')"
