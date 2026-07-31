@@ -270,6 +270,7 @@ export class SimulatedGuest extends EventEmitter {
         "shell",
         "processes",
         "filesystem",
+        "fs_drives",
         "system",
         "show_message"
       ]
@@ -726,6 +727,9 @@ export class SimulatedGuest extends EventEmitter {
     method: string,
     params: Record<string, unknown>
   ): Promise<unknown> {
+    if (method === "fs_drives") {
+      return { drives: [{ path: "C:\\", driveType: 3 }] };
+    }
     const guestPath = this.resolveGuestPath(String(params.path ?? params.source ?? ""));
     if (method === "fs_stat") {
       const info = await stat(guestPath);

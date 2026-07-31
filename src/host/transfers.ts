@@ -42,6 +42,9 @@ export interface TransferProgress {
   source: string;
   destination: string;
   sha256?: string;
+  totalBytes?: number;
+  totalFiles?: number;
+  currentPath?: string;
 }
 
 export type GuestRequester = (
@@ -90,8 +93,13 @@ export class TransferCoordinator {
     private readonly requestGuest: GuestRequester,
     private readonly onResourceOpened: (sessionId: string, resource: string) => void,
     private readonly onResourceClosed: (sessionId: string, resource: string) => void,
-    private readonly requestTimeoutMs: number
+    private readonly requestTimeoutMs: number,
+    private readonly onProgress: (sessionId: string, progress: TransferProgress) => void = () => undefined
   ) {
+  }
+
+  private report(sessionId: string, progress: TransferProgress): void {
+    this.onProgress(sessionId, { ...progress });
   }
 
   async execute(
@@ -177,18 +185,21 @@ export class TransferCoordinator {
     if (!sourceInfo.isFile()) {
       throw new Error("HOST_SOURCE_NOT_FILE");
     }
-    const summary = emptyProgress("host-to-guest", source, guestPath);
+    const summary = { ...emptyProgress("host-to-guest", source, guestPath), totalBytes: sourceInfo.size, totalFiles: 1, currentPath: source };
+    this.report(sessionId, summary);
     const result = await this.pushOneFile(
       sessionId,
       source,
       guestPath,
       overwrite,
-      transfer
+      transfer,
+      (bytes, chunks) => { summary.bytes = bytes; summary.chunks = chunks; this.report(sessionId, summary); }
     );
     summary.files = 1;
     summary.bytes = result.bytes;
     summary.chunks = result.chunks;
     summary.sha256 = result.sha256;
+    this.report(sessionId, summary);
     return summary;
   }
 
@@ -201,18 +212,26 @@ export class TransferCoordinator {
     const hostPath = requireString(params, "host_path");
     const overwrite = params["overwrite"] === true;
     const destination = await this.resolveHostPath(hostPath, false);
-    const summary = emptyProgress("guest-to-host", guestPath, destination);
+    const summary = { ...emptyProgress("guest-to-host", guestPath, destination), totalFiles: 1, currentPath: guestPath };
+    this.report(sessionId, summary);
     const result = await this.pullOneFile(
       sessionId,
       guestPath,
       destination,
       overwrite,
-      transfer
+      transfer,
+      (bytes, chunks, totalBytes) => {
+        summary.bytes = bytes;
+        summary.chunks = chunks;
+        if (totalBytes !== undefined) summary.totalBytes = totalBytes;
+        this.report(sessionId, summary);
+      }
     );
     summary.files = 1;
     summary.bytes = result.bytes;
     summary.chunks = result.chunks;
     summary.sha256 = result.sha256;
+    this.report(sessionId, summary);
     return summary;
   }
 
@@ -234,7 +253,9 @@ export class TransferCoordinator {
     }
     const entries = await collectHostTree(source, () => this.assertActive(transfer));
     this.assertActive(transfer);
-    const summary = emptyProgress("host-to-guest", source, guestPath);
+    const files = entries.filter((item) => !item.isDirectory);
+    const summary = { ...emptyProgress("host-to-guest", source, guestPath), totalFiles: files.length, totalBytes: files.reduce((total, entry) => total + entry.size, 0) };
+    this.report(sessionId, summary);
     await this.guestOk(sessionId, "fs_mkdir", {
       path: guestPath,
       recursive: true
@@ -247,18 +268,24 @@ export class TransferCoordinator {
       });
       summary.directories += 1;
     }
-    for (const entry of entries.filter((item) => !item.isDirectory)) {
+    let completedBytes = 0;
+    let completedChunks = 0;
+    for (const entry of files) {
       this.assertActive(transfer);
       const result = await this.pushOneFile(
         sessionId,
         entry.absolutePath,
         joinGuestPath(guestPath, entry.relativePath),
         overwrite,
-        transfer
+        transfer,
+        (bytes, chunks) => { summary.currentPath = entry.relativePath; summary.bytes = completedBytes + bytes; summary.chunks = completedChunks + chunks; this.report(sessionId, summary); }
       );
       summary.files += 1;
-      summary.bytes += result.bytes;
-      summary.chunks += result.chunks;
+      completedBytes += result.bytes;
+      completedChunks += result.chunks;
+      summary.bytes = completedBytes;
+      summary.chunks = completedChunks;
+      this.report(sessionId, summary);
     }
     return summary;
   }
@@ -276,7 +303,9 @@ export class TransferCoordinator {
     await ensureDirectoryDestination(destination);
     const entries = await this.collectGuestTree(sessionId, guestPath, transfer);
     this.assertActive(transfer);
-    const summary = emptyProgress("guest-to-host", guestPath, destination);
+    const files = entries.filter((item) => !item.isDirectory);
+    const summary = { ...emptyProgress("guest-to-host", guestPath, destination), totalFiles: files.length };
+    this.report(sessionId, summary);
     for (const entry of entries.filter((item) => item.isDirectory)) {
       this.assertActive(transfer);
       const target = resolveRelative(destination, entry.relativePath);
@@ -284,7 +313,9 @@ export class TransferCoordinator {
       await mkdir(target, { recursive: true });
       summary.directories += 1;
     }
-    for (const entry of entries.filter((item) => !item.isDirectory)) {
+    let completedBytes = 0;
+    let completedChunks = 0;
+    for (const entry of files) {
       this.assertActive(transfer);
       const target = resolveRelative(destination, entry.relativePath);
       await rejectCaseConflict(target);
@@ -293,11 +324,23 @@ export class TransferCoordinator {
         entry.guestPath,
         target,
         overwrite,
-        transfer
+        transfer,
+        (bytes, chunks, totalBytes) => {
+          summary.currentPath = entry.relativePath;
+          summary.bytes = completedBytes + bytes;
+          summary.chunks = completedChunks + chunks;
+          // The current file reports its expected length. Combine it with
+          // completed files instead of adding it again for every chunk.
+          if (totalBytes !== undefined) summary.totalBytes = completedBytes + totalBytes;
+          this.report(sessionId, summary);
+        }
       );
       summary.files += 1;
-      summary.bytes += result.bytes;
-      summary.chunks += result.chunks;
+      completedBytes += result.bytes;
+      completedChunks += result.chunks;
+      summary.bytes = completedBytes;
+      summary.chunks = completedChunks;
+      this.report(sessionId, summary);
     }
     return summary;
   }
@@ -307,7 +350,8 @@ export class TransferCoordinator {
     hostPath: string,
     guestPath: string,
     overwrite: boolean,
-    transfer: ActiveTransfer
+    transfer: ActiveTransfer,
+    onProgress?: (bytes: number, chunks: number) => void
   ): Promise<{ bytes: number; chunks: number; sha256: string }> {
     const sourceInfo = await lstat(hostPath);
     if (sourceInfo.isSymbolicLink()) {
@@ -356,6 +400,7 @@ export class TransferCoordinator {
       }
       transfer.guestTransferId = transferId;
       offset = resumeOffset;
+      onProgress?.(offset, chunks);
       const buffer = Buffer.allocUnsafe(TRANSFER_CHUNK_BYTES);
       while (offset < sourceInfo.size) {
         this.assertActive(transfer);
@@ -381,6 +426,7 @@ export class TransferCoordinator {
         }
         offset = nextOffset;
         chunks += 1;
+        onProgress?.(offset, chunks);
       }
       await this.guestOk(sessionId, "file_write_commit", {
         transferId,
@@ -410,7 +456,8 @@ export class TransferCoordinator {
     guestPath: string,
     hostPath: string,
     overwrite: boolean,
-    transfer: ActiveTransfer
+    transfer: ActiveTransfer,
+    onProgress?: (bytes: number, chunks: number, totalBytes?: number) => void
   ): Promise<{ bytes: number; chunks: number; sha256: string }> {
     await this.prepareHostDestination(hostPath, overwrite);
     const tempPath = resolve(
@@ -459,6 +506,7 @@ export class TransferCoordinator {
           await writePullMetadata(metaPath, guestPath, expectedSize);
           resumed.expectedSize = expectedSize;
         }
+        onProgress?.(offset, chunks, expectedSize);
         const data = base64Field(response, "dataBase64");
         if (
           data.length > TRANSFER_CHUNK_BYTES ||
@@ -475,6 +523,7 @@ export class TransferCoordinator {
           hash.update(data);
           offset = nextOffset;
           chunks += 1;
+          onProgress?.(offset, chunks, expectedSize);
         }
         if (eof) {
           if (offset !== expectedSize) {

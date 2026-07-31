@@ -79,6 +79,23 @@ admin windows can control two guests concurrently: assign each guest a distinct
 port in its INI, then set each admin window to its matching port. For headless
 MCP access to a non-default guest, use `npx windows98-mcp --port <port>`.
 
+### Chained broker proxy
+
+The admin app can proxy **upward** to another normal broker. The Windows VM
+continues to connect to the local host, then the local broker connects outward
+to the remote broker using that remote broker's ordinary guest port. No extra
+proxy listener is opened locally:
+
+```text
+WIN98CTL.EXE -> local admin/broker -> remote admin/broker
+```
+
+Start the remote broker or remote admin app on its chosen port. In the local
+admin app, enable **Proxy upward to remote broker**, enter the remote IP and
+port, and Apply. The local broker retries every two seconds. Once proxied, use
+MCP or the admin app on the remote machine for VM control; the local app keeps
+the transparent bridge exclusive so it cannot issue competing guest frames.
+
 ## CLI
 
 ```text
@@ -92,6 +109,7 @@ smoke-test          Exercise a connected guest inside C:\MCPTEST
 diagnostics [dir]   Collect sanitized diagnostics
 
 --port <port>       Override the runtime listener port (default: 9898)
+--upstream <ip:port> Relay the connected VM to an upstream normal broker
 --state-dir <dir>   Override local broker state storage
 ```
 

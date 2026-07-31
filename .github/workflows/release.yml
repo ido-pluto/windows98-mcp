@@ -51,9 +51,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows98-mcp-guest-release
-          path: |
-            out/release/windows98-mcp-guest.zip
-            out/release/windows98-mcp-guest.zip.sha256
+          path: out/release/windows98-mcp-guest.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -107,7 +105,6 @@ jobs:
           Copy-Item $sidecar "$stage/broker-sidecar/windows98-mcp-broker.exe"
           Copy-Item 'admin/README.md' "$stage/README.TXT"
           Compress-Archive -LiteralPath $stage -DestinationPath "out/release/$env:ADMIN_ARTIFACT.zip" -Force
-          (Get-FileHash -Algorithm SHA256 "out/release/$env:ADMIN_ARTIFACT.zip").Hash.ToLowerInvariant() + "  $env:ADMIN_ARTIFACT.zip" | Set-Content -Encoding ascii -NoNewline "out/release/$env:ADMIN_ARTIFACT.zip.sha256"
       - name: Build portable macOS admin archive
         if: matrix.platform == 'macos'
         shell: bash
@@ -131,14 +128,10 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$bundled_app"
           cp admin/README.md "$stage/README.TXT"
           ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
-          hash="$(shasum -a 256 "out/release/$ADMIN_ARTIFACT.zip" | awk '{print $1}')"
-          printf '%s  %s\n' "$hash" "$ADMIN_ARTIFACT.zip" > "out/release/$ADMIN_ARTIFACT.zip.sha256"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}-release
-          path: |
-            out/release/${{ matrix.artifact }}.zip
-            out/release/${{ matrix.artifact }}.zip.sha256
+          path: out/release/${{ matrix.artifact }}.zip
           if-no-files-found: error
           retention-days: 1
 

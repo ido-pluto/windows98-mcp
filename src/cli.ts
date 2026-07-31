@@ -228,11 +228,13 @@ With no command, the stdio MCP adapter starts for npx-based MCP clients.
 
 Network and configuration options:
   --port <port>       Guest listener port (default: 9898)
+  --upstream <ip:port> Transparently relay a connected guest to a normal upstream broker
   --config <file>     Load a broker JSON configuration file
   --state-dir <dir>   Store logs and artifacts in this directory
 
 Examples:
   npx windows98-mcp
   npx windows98-mcp --port 9898
+  npx windows98-mcp broker --port 9898 --upstream 192.168.1.50:9898
 `);
 }

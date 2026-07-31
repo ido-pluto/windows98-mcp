@@ -6,6 +6,17 @@ Choose the archive that matches the **host** computer: `windows-x64` is for ordi
 
 It starts the bundled Node broker sidecar, waits up to five seconds for the Windows 98 guest (which always dials the host), shows status/capabilities, displays a Win98 message box, streams a command, transfers files/directories, and previews/saves screenshots through native Windows dialogs.
 
+## Upstream proxy
+
+The Connection panel can enable an outbound proxy to a normal broker running
+on another machine. Enter that machine's IP and its normal guest listener port
+(default `9898`). The local broker keeps the VM connection, dials the remote
+broker every two seconds, and transparently forwards the existing guest
+protocol. The remote machine then uses its ordinary local admin app or
+`npx windows98-mcp` MCP adapter. No extra proxy listener is opened locally.
+While this mode is active, VM controls in the local admin app are disabled to
+avoid competing with the remote broker.
+
 ## Guest setup
 
 Edit the shipped `WIN98CTL.INI` directly:

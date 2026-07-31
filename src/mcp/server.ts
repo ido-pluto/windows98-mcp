@@ -562,6 +562,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     annotations: destructive
   },
   {
+    name: "fs_drives",
+    description: "List available Windows drive roots for filesystem browsing.",
+    inputSchema: empty,
+    annotations: readOnly
+  },
+  {
     name: "fs_stat",
     description: "Read metadata for a guest filesystem path.",
     inputSchema: z.strictObject({

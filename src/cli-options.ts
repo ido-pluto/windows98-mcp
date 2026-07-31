@@ -64,6 +64,22 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       configArgs.push("--state-dir", value);
       continue;
     }
+    if (option.name === "--upstream") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      const separator = value.lastIndexOf(":");
+      if (separator <= 0 || separator === value.length - 1) {
+        throw new Error("CLI_INVALID:--upstream (use host:port)");
+      }
+      const host = value.slice(0, separator).trim();
+      const port = Number(value.slice(separator + 1));
+      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error("CLI_INVALID:--upstream (use host:port)");
+      }
+      overrides.upstreamHost = host;
+      overrides.upstreamPort = port;
+      configArgs.push("--upstream", value);
+      continue;
+    }
 
     if (!command && COMMANDS.has(token)) {
       command = token as CliCommand;

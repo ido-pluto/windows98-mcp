@@ -152,6 +152,12 @@ export class BrokerClient {
         this.ready = true;
         continue;
       }
+      // Progress notifications are informational and may arrive before the
+      // request's final response. MCP callers do not consume them directly;
+      // the Tauri client listens to the same event through its native pipe.
+      if (isBrokerProgress(value) && value.sessionId === this.sessionId) {
+        continue;
+      }
       if (!isBrokerResponse(value)) {
         this.socket?.destroy(new Error("BROKER_RESPONSE_INVALID"));
         return;
@@ -247,5 +253,21 @@ function isBrokerResponse(value: unknown): value is BrokerResponse {
     "result" in value &&
     typeof value.result === "object" &&
     value.result !== null
+  );
+}
+
+function isBrokerProgress(
+  value: unknown
+): value is { kind: "broker_progress"; sessionId: string; progress: object } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "broker_progress" &&
+    "sessionId" in value &&
+    typeof value.sessionId === "string" &&
+    "progress" in value &&
+    typeof value.progress === "object" &&
+    value.progress !== null
   );
 }

@@ -6,6 +6,9 @@ import { DEFAULT_LEASE_TTL_MS, DEFAULT_WAIT_TICKET_TTL_MS } from "../shared/type
 export interface BrokerConfig {
   bindHost: "0.0.0.0";
   guestPort: number;
+  /** When set, this broker transparently relays its guest connection upstream. */
+  upstreamHost?: string;
+  upstreamPort?: number;
   pipePath: string;
   stateDir: string;
   artifactDir: string;
@@ -20,6 +23,8 @@ export interface BrokerConfig {
 
 export interface BrokerConfigFile {
   guestPort?: number;
+  upstreamHost?: string;
+  upstreamPort?: number;
   stateDir?: string;
   artifactDir?: string;
   logPath?: string;
@@ -40,6 +45,8 @@ export interface LoadBrokerConfigOptions {
 
 interface RuntimeSettings {
   port?: number;
+  upstreamHost?: string;
+  upstreamPort?: number;
 }
 
 const DEFAULT_PORT = 9898;
@@ -76,6 +83,21 @@ export async function loadBrokerConfig(
     65535
   );
   const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");
+  const configuredUpstreamHost = options.overrides?.upstreamHost ?? merged.upstreamHost ?? runtime.upstreamHost;
+  const upstreamHost = typeof configuredUpstreamHost === "string" && configuredUpstreamHost.trim()
+    ? configuredUpstreamHost.trim()
+    : undefined;
+  const upstreamPort = upstreamHost
+    ? integer(
+      options.overrides?.upstreamPort ?? merged.upstreamPort ?? runtime.upstreamPort ?? DEFAULT_PORT,
+      "upstreamPort",
+      1,
+      65535
+    )
+    : undefined;
+  const upstream = upstreamHost !== undefined && upstreamPort !== undefined
+    ? { upstreamHost, upstreamPort }
+    : {};
   const stateDir = resolveConfiguredPath(
     merged.stateDir ?? env["WIN98_MCP_STATE_DIR"] ??
       (guestPort === DEFAULT_PORT
@@ -86,6 +108,7 @@ export async function loadBrokerConfig(
   const config: BrokerConfig = {
     bindHost: "0.0.0.0",
     guestPort,
+    ...upstream,
     pipePath: defaultPipePath(guestPort),
     stateDir,
     artifactDir: resolveConfiguredPath(

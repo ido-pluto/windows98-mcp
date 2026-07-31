@@ -136,4 +136,41 @@ describe("guest-to-host transfer resume", () => {
       (await readdir(root)).some((name) => name.includes("win98mcp.partial"))
     ).toBe(false);
   });
+
+  it("reports incremental byte progress while a pull is still active", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "win98-pull-progress-"));
+    roots.push(root);
+    const destination = path.join(root, "download.bin");
+    const guestBytes = Buffer.alloc(130_000, 0x61);
+    const digest = createHash("sha256").update(guestBytes).digest("hex");
+    const updates: Array<{ bytes: number; totalBytes?: number }> = [];
+    const coordinator = new TransferCoordinator(
+      async (_sessionId, method, params): Promise<GuestResponse> => {
+        if (method !== "file_read_chunk") throw new Error(`UNEXPECTED_METHOD:${method}`);
+        const offset = Number(params["offset"]);
+        const end = Math.min(offset + 64 * 1024, guestBytes.length);
+        return {
+          kind: "response", requestId: `read-${offset}`, ok: true, code: "OK", message: "chunk",
+          data: {
+            offset, nextOffset: end, size: guestBytes.length, eof: end === guestBytes.length,
+            dataBase64: guestBytes.subarray(offset, end).toString("base64"),
+            ...(end === guestBytes.length ? { sha256: digest } : {})
+          }
+        };
+      },
+      () => undefined,
+      () => undefined,
+      5_000,
+      (_sessionId, progress) => updates.push({ bytes: progress.bytes, ...(progress.totalBytes !== undefined ? { totalBytes: progress.totalBytes } : {}) })
+    );
+
+    await coordinator.execute("session", "file_pull", {
+      guest_path: "C:\\MCPTEST\\PROGRESS.BIN",
+      host_path: destination,
+      overwrite: true
+    });
+
+    expect(updates.some((update) => update.bytes > 0 && update.bytes < guestBytes.length)).toBe(true);
+    expect(updates.at(-1)).toEqual({ bytes: guestBytes.length, totalBytes: guestBytes.length });
+  });
 });

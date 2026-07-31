@@ -19,32 +19,16 @@
             "label": "Windows 98 guest agent"
           },
           {
-            "path": "out/release/windows98-mcp-guest.zip.sha256",
-            "label": "Windows 98 guest SHA-256"
-          },
-          {
             "path": "out/release/windows98-mcp-admin-windows-x64.zip",
             "label": "Windows x64 admin app"
-          },
-          {
-            "path": "out/release/windows98-mcp-admin-windows-x64.zip.sha256",
-            "label": "Windows x64 admin app SHA-256"
           },
           {
             "path": "out/release/windows98-mcp-admin-windows-arm64.zip",
             "label": "Windows ARM64 admin app"
           },
           {
-            "path": "out/release/windows98-mcp-admin-windows-arm64.zip.sha256",
-            "label": "Windows ARM64 admin app SHA-256"
-          },
-          {
             "path": "out/release/windows98-mcp-admin-macos-arm64.zip",
             "label": "macOS Apple Silicon admin app"
-          },
-          {
-            "path": "out/release/windows98-mcp-admin-macos-arm64.zip.sha256",
-            "label": "macOS Apple Silicon admin app SHA-256"
           },
           {
             "path": "out/release/windows98-mcp-*.tgz",

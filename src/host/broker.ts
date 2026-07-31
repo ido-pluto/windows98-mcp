@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, unlink } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
 import {
   createServer,
   createConnection,
@@ -39,7 +40,8 @@ import { IncomingStreamRegistry } from "./incoming-streams.js";
 import { JsonlLogger } from "./logger.js";
 import {
   TRANSFER_METHODS,
-  TransferCoordinator
+  TransferCoordinator,
+  type TransferProgress
 } from "./transfers.js";
 
 interface GuestHelloMessage {
@@ -104,7 +106,8 @@ const NON_LOCKING_METHODS = new Set([
   "vm_capabilities",
   "vm_lock",
   "vm_wait",
-  "vm_unlock"
+  "vm_unlock",
+  "host_network_info"
 ]);
 
 export class Broker {
@@ -116,6 +119,7 @@ export class Broker {
   private localServer?: Server;
   private guestServer?: Server;
   private guest: GuestConnection | undefined;
+  private proxyBridge: UpstreamGuestBridge | undefined;
   private readonly adapters = new Map<string, AdapterSession>();
   private readonly openResources = new Map<string, Set<string>>();
   private started = false;
@@ -142,7 +146,8 @@ export class Broker {
       },
       (sessionId, resource) => this.addResource(sessionId, resource),
       (sessionId, resource) => this.removeResource(sessionId, resource),
-      config.requestTimeoutMs
+      config.requestTimeoutMs,
+      (sessionId, progress) => this.emitTransferProgress(sessionId, progress)
     );
     this.lease.on("expired", (owner: LeaseOwner) => {
       this.logger.write("warn", "lease_expired", {
@@ -239,6 +244,8 @@ export class Broker {
     }
     this.adapters.clear();
     await this.transfers.abortAll();
+    this.proxyBridge?.destroy();
+    this.proxyBridge = undefined;
     this.guest?.destroy();
     this.guest = undefined;
     await Promise.allSettled([
@@ -451,6 +458,18 @@ export class Broker {
         })
       );
     }
+    if (method === "host_network_info") {
+      return this.brokerResponse(
+        requestId,
+        this.result(sessionId, requestId, true, "OK", "Host IPv4 addresses.", false, undefined, {
+          addresses: hostIpv4Addresses(),
+          guestPort: this.config.guestPort,
+          upstream: this.config.upstreamHost
+            ? { host: this.config.upstreamHost, port: this.config.upstreamPort }
+            : undefined
+        })
+      );
+    }
     if (method === "vm_capabilities") {
       if (!this.capabilities) {
         return this.brokerResponse(
@@ -637,6 +656,13 @@ export class Broker {
     return { kind: "broker_response", id, result };
   }
 
+  private emitTransferProgress(sessionId: string, progress: TransferProgress): void {
+    const adapter = this.adapters.get(sessionId);
+    if (adapter?.greeted && !adapter.socket.destroyed) {
+      writeLine(adapter.socket, { kind: "broker_progress", sessionId, progress });
+    }
+  }
+
   private acceptAdapter(socket: Socket): void {
     socket.setNoDelay(true);
     const provisionalId = randomUUID();
@@ -734,13 +760,48 @@ export class Broker {
   }
 
   private acceptGuest(socket: Socket): void {
-    if (this.guest && !this.guest.closed) {
+    if ((this.guest && !this.guest.closed) || (this.proxyBridge && !this.proxyBridge.closed)) {
       socket.end();
       this.logger.write("warn", "guest_rejected", { reason: "already_connected" });
       return;
     }
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 10_000);
+    if (this.config.upstreamHost && this.config.upstreamPort) {
+      const epoch = ++this.connectionEpoch;
+      const bridge = new UpstreamGuestBridge(
+        socket,
+        this.config.upstreamHost,
+        this.config.upstreamPort,
+        (state) => {
+          if (this.proxyBridge === bridge) {
+            this.connectionState = state;
+          }
+        },
+        (error) => {
+          if (this.proxyBridge === bridge) {
+            this.proxyBridge = undefined;
+            this.connectionState = { state: "offline", epoch };
+            this.logger.write("warn", "upstream_bridge_closed", { error, upstream: `${this.config.upstreamHost}:${this.config.upstreamPort}` });
+          }
+        },
+        epoch,
+        socket.remoteAddress
+      );
+      this.proxyBridge = bridge;
+      this.connectionState = {
+        state: "connecting",
+        epoch,
+        connectedAt: new Date().toISOString(),
+        ...(socket.remoteAddress ? { remoteAddress: socket.remoteAddress } : {})
+      };
+      this.logger.write("info", "upstream_bridge_connecting", {
+        upstream: `${this.config.upstreamHost}:${this.config.upstreamPort}`,
+        guestAddress: socket.remoteAddress
+      });
+      bridge.start();
+      return;
+    }
     const guest = new GuestConnection(
       socket,
       this.config,
@@ -1017,6 +1078,118 @@ export class Broker {
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
     return false;
+  }
+}
+
+function hostIpv4Addresses(): Array<{ name: string; address: string; netmask: string; virtual: boolean }> {
+  const addresses: Array<{ name: string; address: string; netmask: string; virtual: boolean }> = [];
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.internal || entry.family !== "IPv4") continue;
+      addresses.push({
+        name,
+        address: entry.address,
+        netmask: entry.netmask,
+        virtual: /vmware|qemu|virtual|vbox|hyper-v|vethernet/i.test(name)
+      });
+    }
+  }
+  return addresses.sort((left, right) => Number(right.virtual) - Number(left.virtual) || left.name.localeCompare(right.name));
+}
+
+/**
+ * A transparent reverse bridge. The local VM still dials this broker, while
+ * this broker dials the configured upstream broker and pipes the existing v2
+ * frames unchanged. The upstream therefore sees the real VM as its guest and
+ * retains the normal broker, lease, screenshot, terminal, and transfer paths.
+ */
+class UpstreamGuestBridge {
+  closed = false;
+  private upstream: Socket | undefined;
+  private retryTimer: NodeJS.Timeout | undefined;
+  private connected = false;
+
+  constructor(
+    private readonly guestSocket: Socket,
+    private readonly host: string,
+    private readonly port: number,
+    private readonly onState: (state: ConnectionSnapshot) => void,
+    private readonly onClose: (error?: Error) => void,
+    private readonly epoch: number,
+    private readonly guestAddress?: string
+  ) {}
+
+  start(): void {
+    this.guestSocket.pause();
+    this.guestSocket.on("error", (error) => this.destroy(error));
+    this.guestSocket.on("close", () => this.destroy());
+    this.connectUpstream();
+  }
+
+  destroy(error?: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.guestSocket.unpipe();
+    this.upstream?.unpipe();
+    this.upstream?.destroy();
+    this.upstream = undefined;
+    this.guestSocket.destroy();
+    this.onClose(error);
+  }
+
+  private connectUpstream(): void {
+    if (this.closed || this.connected) return;
+    this.onState({
+      state: "connecting",
+      epoch: this.epoch,
+      connectedAt: new Date().toISOString(),
+      ...(this.guestAddress ? { remoteAddress: this.guestAddress } : {})
+    });
+    const upstream = createConnection({ host: this.host, port: this.port });
+    this.upstream = upstream;
+    upstream.setNoDelay(true);
+    upstream.setKeepAlive(true, 10_000);
+    let settled = false;
+    const retry = (error?: Error): void => {
+      if (settled || this.closed || this.connected) return;
+      settled = true;
+      upstream.destroy();
+      this.upstream = undefined;
+      this.retryTimer = setTimeout(() => this.connectUpstream(), 2_000);
+      this.retryTimer.unref();
+      if (error) {
+        this.onState({
+          state: "connecting",
+          epoch: this.epoch,
+          ...(this.guestAddress ? { remoteAddress: this.guestAddress } : {})
+        });
+      }
+    };
+    upstream.once("error", retry);
+    upstream.once("connect", () => {
+      if (this.closed) {
+        upstream.destroy();
+        return;
+      }
+      settled = true;
+      this.connected = true;
+      upstream.removeListener("error", retry);
+      upstream.on("error", (error) => this.destroy(error));
+      upstream.on("close", () => this.destroy());
+      this.guestSocket.pipe(upstream);
+      upstream.pipe(this.guestSocket);
+      this.guestSocket.resume();
+      this.onState({
+        state: "online",
+        epoch: this.epoch,
+        connectedAt: new Date().toISOString(),
+        lastSeenAt: new Date().toISOString(),
+        ...(this.guestAddress ? { remoteAddress: this.guestAddress } : {})
+      });
+    });
+    upstream.once("close", () => retry());
   }
 }
 
