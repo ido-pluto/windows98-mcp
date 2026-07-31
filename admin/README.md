@@ -2,6 +2,8 @@
 
 This Tauri desktop companion is released for Windows x64, Windows ARM64, and macOS Apple Silicon. The default listener port (`9898`) shares the MCP broker endpoint (`\\.\pipe\win98-mcp` on Windows; `/tmp/win98-mcp.sock` on macOS). Non-default ports use a matching port-scoped local endpoint, so separate admin windows can run safely against separate guests.
 
+Choose the archive that matches the **host** computer: `windows-x64` is for ordinary Intel/AMD Windows PCs, `windows-arm64` is only for ARM Windows PCs, and `macos-arm64` is for Apple Silicon Macs. Windows needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) used by Tauri. The macOS archive is ad-hoc signed, not Developer-ID notarized; if Gatekeeper blocks its first launch after extraction, move the app to Applications and run `xattr -dr com.apple.quarantine "/Applications/Windows 98 MCP Admin.app"`, then open it normally.
+
 It starts the bundled Node broker sidecar, waits up to five seconds for the Windows 98 guest (which always dials the host), shows status/capabilities, displays a Win98 message box, streams a command, transfers files/directories, and previews/saves screenshots through native Windows dialogs.
 
 ## Guest setup
@@ -31,7 +33,7 @@ Before a release, build the Node SEA sidecar as `src-tauri/resources/broker-side
 powershell -ExecutionPolicy Bypass -File .\scripts\package-portable.ps1 -Version 0.1.0
 ```
 
-This writes `out\windows98-mcp-admin-<version>-windows-x64.zip` and a SHA-256 file. The release workflow also creates Windows ARM64 and macOS Apple Silicon ZIPs. The ZIP contains the native admin app, its matching native broker sidecar, and `README.TXT`; it does not create an installer or require signing.
+This writes `out\windows98-mcp-admin-<version>-windows-x64.zip` and a SHA-256 file. The release workflow also creates Windows ARM64 and macOS Apple Silicon ZIPs. The ZIP contains the native admin app, its matching native broker sidecar, and `README.TXT`; it does not create an installer. macOS release bundles are ad-hoc signed so their integrity is valid after packaging, but they are not Developer-ID notarized.
 
 For development, set `WIN98_MCP_BROKER_SIDECAR` to the sidecar EXE before `npm run tauri:dev`.
 

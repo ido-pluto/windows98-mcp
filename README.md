@@ -16,6 +16,10 @@ files and directories without ordinary Computer Use.
 [All releases](https://github.com/ido-pluto/windows98-mcp/releases/latest) ·
 [npm package](https://www.npmjs.com/package/windows98-mcp)
 
+Download the admin archive for the **host** computer: Windows x64 is Intel/AMD,
+Windows ARM64 is only for ARM Windows PCs, and macOS ARM64 is for Apple Silicon
+Macs. Windows needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). The macOS portable app is ad-hoc signed rather than Developer-ID notarized; if Gatekeeper blocks its first launch, move it to Applications and run `xattr -dr com.apple.quarantine "/Applications/Windows 98 MCP Admin.app"`.
+
 ## How it works
 
 `WIN98CTL.EXE` is a C89 x86 guest agent that runs on Windows 98 SE through

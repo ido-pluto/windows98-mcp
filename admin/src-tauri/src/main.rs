@@ -39,8 +39,17 @@ fn write_settings(port: u16) -> Result<(), String> { fs::write(settings_path()?,
 
 fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("WIN98_MCP_BROKER_SIDECAR") { return Ok(PathBuf::from(path)); }
-    let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join("broker-sidecar").join(sidecar_file_name());
-    if resource.is_file() { return Ok(resource); }
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    // Tauri places declared bundle resources beneath `resources/` in a macOS
+    // app.  Portable Windows archives keep the sidecar beside the executable.
+    // Check both canonical bundle layouts so the release archive never needs
+    // to be modified after macOS has signed the .app bundle.
+    for resource in [
+        resource_dir.join("broker-sidecar").join(sidecar_file_name()),
+        resource_dir.join("resources").join("broker-sidecar").join(sidecar_file_name()),
+    ] {
+        if resource.is_file() { return Ok(resource); }
+    }
     let beside_exe = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Cannot determine admin executable directory")?.join("broker-sidecar").join(sidecar_file_name());
     if beside_exe.is_file() { return Ok(beside_exe); }
     Err(format!("Broker sidecar missing. Set WIN98_MCP_BROKER_SIDECAR for development or install a release that includes resources/broker-sidecar/{}.", sidecar_file_name()))

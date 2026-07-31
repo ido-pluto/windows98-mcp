@@ -123,11 +123,12 @@ jobs:
           rm -rf "$stage" "out/release/$ADMIN_ARTIFACT.zip"
           mkdir -p "$stage"
           cp -R "$app" "$stage/"
-          # Tauri copies declared resources beneath Contents/Resources/resources.
-          # The portable layout also provides the direct location used at runtime.
           bundled_app="$stage/$(basename "$app")"
-          mkdir -p "$bundled_app/Contents/Resources"
-          cp -R admin/src-tauri/resources/broker-sidecar "$bundled_app/Contents/Resources/broker-sidecar"
+          test -f "$bundled_app/Contents/Resources/resources/broker-sidecar/windows98-mcp-broker"
+          # The portable archive is intentionally unsigned with a Developer ID,
+          # but a valid ad-hoc signature prevents macOS treating it as damaged.
+          codesign --force --deep --sign - "$bundled_app"
+          codesign --verify --deep --strict --verbose=2 "$bundled_app"
           cp admin/README.md "$stage/README.TXT"
           ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
           hash="$(shasum -a 256 "out/release/$ADMIN_ARTIFACT.zip" | awk '{print $1}')"

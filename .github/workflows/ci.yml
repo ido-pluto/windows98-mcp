@@ -135,7 +135,10 @@ jobs:
           rm -rf "$stage" "out/release/$ADMIN_ARTIFACT.zip"
           mkdir -p "$stage"
           cp -R "$app" "$stage/"
-          cp -R admin/src-tauri/resources/broker-sidecar "$stage"/*/Contents/Resources/broker-sidecar
+          bundled_app="$stage/$(basename "$app")"
+          test -f "$bundled_app/Contents/Resources/resources/broker-sidecar/windows98-mcp-broker"
+          codesign --force --deep --sign - "$bundled_app"
+          codesign --verify --deep --strict --verbose=2 "$bundled_app"
           cp admin/README.md "$stage/README.TXT"
           ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
           hash="$(shasum -a 256 "out/release/$ADMIN_ARTIFACT.zip" | awk '{print $1}')"
