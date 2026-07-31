@@ -2,7 +2,10 @@ node_modules/
 dist/
 out/
 src-tauri/target/
-src-tauri/icons/
+# The Tauri application icon is a source asset and must be available on every
+# native release runner.
+!src-tauri/icons/
+!src-tauri/icons/icon.png
 src-tauri/gen/
 src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe
 src-tauri/resources/broker-sidecar/windows98-mcp-broker
