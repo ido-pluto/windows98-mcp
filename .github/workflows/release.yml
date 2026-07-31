@@ -38,8 +38,10 @@ jobs:
           Copy-Item guest/dist/WIN98CTL.EXE,guest/WIN98CTL.INI -Destination $probe
           Push-Location $probe
           try {
-            & .\WIN98CTL.EXE --self-test
-            if ($LASTEXITCODE -ne 0) { throw "WIN98CTL self-test failed with exit code $LASTEXITCODE" }
+          # WIN98CTL is a GUI subsystem program, so invoking it directly from
+          # PowerShell does not wait. Start-Process gives the actual exit code.
+          $result = Start-Process -FilePath '.\WIN98CTL.EXE' -ArgumentList '--self-test' -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "WIN98CTL self-test failed with exit code $($result.ExitCode)" }
             Get-Content SELFTEST.TXT
             Select-String -Path SELFTEST.TXT -Pattern 'Target compatibility: PASS', 'Result: PASS' | Out-Host
           } finally { Pop-Location }
