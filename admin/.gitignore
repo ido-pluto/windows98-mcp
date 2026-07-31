@@ -3,8 +3,8 @@ dist/
 out/
 src-tauri/target/
 # The Tauri application icon is a source asset and must be available on every
-# native release runner.
-!src-tauri/icons/
+# native release runner. Other generated or local icon variants stay ignored.
+src-tauri/icons/*
 !src-tauri/icons/icon.png
 src-tauri/gen/
 src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe
