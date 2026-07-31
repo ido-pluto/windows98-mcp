@@ -682,6 +682,7 @@ function testCrc32(data: Buffer): number {
 async function createHarness(): Promise<Harness> {
   const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-test-"));
   const guestPort = await freePort();
+  const adapterPort = await freePort();
   const pipePath =
     process.platform === "win32"
       ? `\\\\.\\pipe\\win98-mcp-test-${randomUUID()}`
@@ -689,6 +690,7 @@ async function createHarness(): Promise<Harness> {
   const config: BrokerConfig = {
     bindHost: "0.0.0.0",
     guestPort,
+    adapterPort,
     pipePath,
     stateDir: root,
     artifactDir: path.join(root, "artifacts"),

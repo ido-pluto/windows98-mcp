@@ -55,9 +55,12 @@ async function createBroker(excludedPort?: number): Promise<{ broker: Broker; ro
   const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-multi-"));
   let guestPort = await freePort();
   while (guestPort === 9898 || guestPort === excludedPort) guestPort = await freePort();
+  let adapterPort = await freePort();
+  while (adapterPort === guestPort) adapterPort = await freePort();
   const config: BrokerConfig = {
     bindHost: "0.0.0.0",
     guestPort,
+    adapterPort,
     pipePath: defaultPipePath(guestPort),
     stateDir: root,
     artifactDir: path.join(root, "artifacts"),

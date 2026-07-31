@@ -16,6 +16,8 @@ const DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
 
 export interface BrokerClientOptions {
   pipePath?: string;
+  host?: string;
+  port?: number;
   sessionId?: string;
   sessionLabel?: string;
   connectTimeoutMs?: number;
@@ -52,6 +54,8 @@ export class BrokerClientError extends Error {
  */
 export class BrokerClient {
   readonly pipePath: string;
+  readonly host: string | undefined;
+  readonly port: number | undefined;
   readonly sessionId: string;
   readonly sessionLabel: string;
 
@@ -69,6 +73,9 @@ export class BrokerClient {
       options.pipePath ??
       process.env["WIN98_MCP_PIPE"] ??
       DEFAULT_BROKER_PIPE;
+    this.host = options.host ?? process.env["WIN98_MCP_BROKER_HOST"];
+    const configuredPort = options.port ?? numberEnvironment("WIN98_MCP_BROKER_PORT");
+    this.port = this.host ? configuredPort ?? 9899 : undefined;
     this.sessionId =
       options.sessionId ??
       process.env["WIN98_MCP_SESSION_ID"] ??
@@ -188,7 +195,9 @@ export class BrokerClient {
 
   private async openSocket(): Promise<Socket> {
     return await new Promise<Socket>((resolve, reject) => {
-      const socket = connect(this.pipePath);
+      const socket = this.host
+        ? connect({ host: this.host, port: this.port! })
+        : connect(this.pipePath);
       let settled = false;
       const timeout = setTimeout(() => {
         if (settled) {
@@ -199,7 +208,7 @@ export class BrokerClient {
         reject(
           new BrokerClientError(
             "BROKER_CONNECT_TIMEOUT",
-            `Timed out connecting to broker pipe ${this.pipePath}.`
+            `Timed out connecting to broker ${this.endpoint}.`
           )
         );
       }, this.connectTimeoutMs);
@@ -215,7 +224,7 @@ export class BrokerClient {
         reject(
           new BrokerClientError(
             "BROKER_UNAVAILABLE",
-            `Could not connect to broker pipe ${this.pipePath}: ${error.message}`
+            `Could not connect to broker ${this.endpoint}: ${error.message}`
           )
         );
       };
@@ -321,6 +330,9 @@ export class BrokerClient {
     if (isBrokerReady(value, this.sessionId)) {
       return;
     }
+    if (isBrokerProgress(value, this.sessionId)) {
+      return;
+    }
     if (!isBrokerResponse(value)) {
       this.socket?.destroy(
         new BrokerClientError(
@@ -348,6 +360,10 @@ export class BrokerClient {
     this.socket = undefined;
     this.receiveBuffer = "";
     this.rejectPending(error);
+  }
+
+  private get endpoint(): string {
+    return this.host ? `${this.host}:${this.port}` : this.pipePath;
   }
 
   private rejectPending(error: Error): void {
@@ -384,6 +400,18 @@ function isBrokerResponse(value: unknown): value is BrokerResponse {
     typeof candidate.result.code === "string" &&
     typeof candidate.result.message === "string"
   );
+}
+
+function isBrokerProgress(value: unknown, sessionId: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate["kind"] === "broker_progress" && candidate["sessionId"] === sessionId;
+}
+
+function numberEnvironment(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65_535 ? parsed : undefined;
 }
 
 function defaultSessionLabel(): string {

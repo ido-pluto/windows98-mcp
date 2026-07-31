@@ -14,6 +14,15 @@ describe("CLI options", () => {
     });
   });
 
+  it("accepts a remote broker host and its TCP control port", () => {
+    expect(parseCliArgs(["--broker-host", "100.79.57.62", "--broker-port", "9899"])).toMatchObject({
+      command: "stdio",
+      brokerHost: "100.79.57.62",
+      brokerPort: 9899,
+      overrides: { adapterPort: 9899 }
+    });
+  });
+
   it("rejects removed guest filtering/configuration options", () => {
     expect(() => parseCliArgs(["--ip", "192.168.60.128"])).toThrow("CLI_UNKNOWN_OPTION:--ip");
     expect(() => parseCliArgs(["configure"])).toThrow("UNKNOWN_COMMAND:configure");

@@ -1,6 +1,6 @@
 # Windows 98 MCP Admin
 
-This Tauri desktop companion is released for Windows x64, Windows ARM64, and macOS Apple Silicon. The default listener port (`9898`) shares the MCP broker endpoint (`\\.\pipe\win98-mcp` on Windows; `/tmp/win98-mcp.sock` on macOS). Non-default ports use a matching port-scoped local endpoint, so separate admin windows can run safely against separate guests.
+This Tauri desktop companion is released for Windows x64, Windows ARM64, and macOS Apple Silicon. The VM guest listener defaults to `9898`; the broker's TCP control endpoint for MCP and admin clients defaults to `9899`. The Connection panel defaults to `127.0.0.1:9899` but can connect to any reachable broker host/IP and port, including a Tailscale address.
 
 Choose the archive that matches the **host** computer: `windows-x64` is for ordinary Intel/AMD Windows PCs, `windows-arm64` is only for ARM Windows PCs, and `macos-arm64` is for Apple Silicon Macs. Windows needs the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) used by Tauri. The macOS archive is ad-hoc signed, not Developer-ID notarized; if Gatekeeper blocks its first launch after extraction, move the app to Applications and run `xattr -dr com.apple.quarantine "/Applications/Windows 98 MCP Admin.app"`, then open it normally.
 
@@ -38,7 +38,7 @@ npm install
 npm run tauri:build
 ```
 
-Before a release, build the Node SEA sidecar as `src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe`. It accepts `broker --port <port>` and derives the default shared or port-scoped local endpoint automatically. Create the unsigned portable x64 ZIP with:
+Before a release, build the Node SEA sidecar as `src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe`. It accepts `broker --port <guest-port> --adapter-port <control-port>`. Create the unsigned portable x64 ZIP with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\package-portable.ps1 -Version 0.1.0

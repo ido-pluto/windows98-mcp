@@ -72,17 +72,22 @@ async function runBroker(): Promise<void> {
 
 async function runStdio(): Promise<void> {
   const config = await loadCliConfig();
-  try {
-    await ensureBroker(config);
-  } catch (error) {
-    process.stderr.write(
-      `[win98-mcp] broker auto-start failed; tools will report unavailable: ${
-        error instanceof Error ? error.message : String(error)
-      }\n`
-    );
+  const brokerHost = cli.brokerHost ?? "127.0.0.1";
+  const brokerPort = cli.brokerPort ?? config.adapterPort;
+  if (isLocalBrokerHost(brokerHost)) {
+    try {
+      await ensureBroker(config);
+    } catch (error) {
+      process.stderr.write(
+        `[win98-mcp] broker auto-start failed; tools will report unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`
+      );
+    }
   }
   await startStdioMcp({
-    pipePath: config.pipePath,
+    host: brokerHost,
+    port: brokerPort,
     requestTimeoutMs: 11 * 60 * 1000
   });
 }
@@ -228,6 +233,8 @@ With no command, the stdio MCP adapter starts for npx-based MCP clients.
 
 Network and configuration options:
   --port <port>       Guest listener port (default: 9898)
+  --broker-host <ip>  Broker control host for MCP (default: 127.0.0.1)
+  --broker-port <port> Broker control port for MCP (default: 9899)
   --upstream <ip:port> Transparently relay a connected guest to a normal upstream broker
   --config <file>     Load a broker JSON configuration file
   --state-dir <dir>   Store logs and artifacts in this directory
@@ -235,6 +242,12 @@ Network and configuration options:
 Examples:
   npx windows98-mcp
   npx windows98-mcp --port 9898
+  npx windows98-mcp --broker-host 100.79.57.62 --broker-port 9899
   npx windows98-mcp broker --port 9898 --upstream 192.168.1.50:9898
 `);
+}
+
+function isLocalBrokerHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }

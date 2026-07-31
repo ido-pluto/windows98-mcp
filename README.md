@@ -108,14 +108,16 @@ simulator           Run the deterministic simulated Windows 98 guest
 smoke-test          Exercise a connected guest inside C:\MCPTEST
 diagnostics [dir]   Collect sanitized diagnostics
 
---port <port>       Override the runtime listener port (default: 9898)
+--port <port>       VM guest listener port (default: 9898)
+--broker-host <ip>  Broker control host for MCP (default: 127.0.0.1)
+--broker-port <port> Broker control port for MCP (default: 9899)
 --upstream <ip:port> Relay the connected VM to an upstream normal broker
 --state-dir <dir>   Override local broker state storage
 ```
 
-The Tauri app normally owns the port setting. `--port` is available for
-headless use and must match `WIN98CTL.INI`; it also selects the matching
-port-scoped local broker endpoint.
+`--port` must match `WIN98CTL.INI`. The broker exposes MCP/admin control on
+TCP port `9899` by default; use `--broker-host` and `--broker-port` to attach
+an MCP session to a broker on another host, for example over Tailscale.
 
 ## MCP tools
 

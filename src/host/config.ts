@@ -6,6 +6,8 @@ import { DEFAULT_LEASE_TTL_MS, DEFAULT_WAIT_TICKET_TTL_MS } from "../shared/type
 export interface BrokerConfig {
   bindHost: "0.0.0.0";
   guestPort: number;
+  /** TCP port for admin/MCP adapters, including adapters on another machine. */
+  adapterPort: number;
   /** When set, this broker transparently relays its guest connection upstream. */
   upstreamHost?: string;
   upstreamPort?: number;
@@ -23,6 +25,7 @@ export interface BrokerConfig {
 
 export interface BrokerConfigFile {
   guestPort?: number;
+  adapterPort?: number;
   upstreamHost?: string;
   upstreamPort?: number;
   stateDir?: string;
@@ -45,11 +48,13 @@ export interface LoadBrokerConfigOptions {
 
 interface RuntimeSettings {
   port?: number;
+  brokerPort?: number;
   upstreamHost?: string;
   upstreamPort?: number;
 }
 
 const DEFAULT_PORT = 9898;
+const DEFAULT_ADAPTER_PORT = 9899;
 
 export function defaultPipePath(port = DEFAULT_PORT): string {
   const suffix = port === DEFAULT_PORT ? "" : `-${port}`;
@@ -82,6 +87,12 @@ export async function loadBrokerConfig(
     1,
     65535
   );
+  const adapterPort = integer(
+    options.overrides?.adapterPort ?? merged.adapterPort ?? runtime.brokerPort ?? envNumber(env["WIN98_MCP_ADAPTER_PORT"]) ?? defaultAdapterPort(guestPort),
+    "adapterPort",
+    1,
+    65535
+  );
   const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");
   const configuredUpstreamHost = options.overrides?.upstreamHost ?? merged.upstreamHost ?? runtime.upstreamHost;
   const upstreamHost = typeof configuredUpstreamHost === "string" && configuredUpstreamHost.trim()
@@ -108,6 +119,7 @@ export async function loadBrokerConfig(
   const config: BrokerConfig = {
     bindHost: "0.0.0.0",
     guestPort,
+    adapterPort,
     ...upstream,
     pipePath: defaultPipePath(guestPort),
     stateDir,
@@ -178,6 +190,12 @@ function integer(value: number, label: string, min: number, max: number): number
   return value;
 }
 
+function defaultAdapterPort(guestPort: number): number {
+  return guestPort === DEFAULT_PORT || guestPort === 65_535
+    ? DEFAULT_ADAPTER_PORT
+    : guestPort + 1;
+}
+
 export function publicConfig(config: BrokerConfig): BrokerConfig { return { ...config }; }
 
 export function configDirectory(config: BrokerConfig): string {
@@ -194,7 +212,7 @@ async function loadRuntimeSettings(env: NodeJS.ProcessEnv, cwd: string): Promise
   try {
     const text = await readFile(path, "utf8");
     const parsed = JSON.parse(text.replace(/^\uFEFF/u, "")) as RuntimeSettings;
-    return typeof parsed.port === "number" ? parsed : {};
+    return typeof parsed.port === "number" || typeof parsed.brokerPort === "number" ? parsed : {};
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     void cwd;

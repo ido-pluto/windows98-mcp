@@ -118,6 +118,7 @@ export class Broker {
   readonly transfers: TransferCoordinator;
 
   private localServer?: Server;
+  private adapterServer?: Server;
   private guestServer?: Server;
   private guest: GuestConnection | undefined;
   private proxyBridge: UpstreamGuestBridge | undefined;
@@ -203,15 +204,18 @@ export class Broker {
       });
     }
     this.localServer = createServer((socket) => this.acceptAdapter(socket));
+    this.adapterServer = createServer((socket) => this.acceptAdapter(socket));
     this.guestServer = createServer((socket) => this.acceptGuest(socket));
     try {
       await Promise.all([
         listen(this.localServer, this.config.pipePath),
+        listen(this.adapterServer, this.config.adapterPort, "0.0.0.0"),
         listen(this.guestServer, this.config.guestPort, this.config.bindHost)
       ]);
     } catch (error) {
       await Promise.allSettled([
         closeServer(this.localServer),
+        closeServer(this.adapterServer),
         closeServer(this.guestServer)
       ]);
       throw error;
@@ -226,6 +230,7 @@ export class Broker {
     this.logger.write("info", "broker_started", {
       bindHost: this.config.bindHost,
       guestPort: this.config.guestPort,
+      adapterPort: this.config.adapterPort,
       pipePath: this.config.pipePath
     });
   }
@@ -251,6 +256,7 @@ export class Broker {
     this.guest = undefined;
     await Promise.allSettled([
       closeServer(this.localServer),
+      closeServer(this.adapterServer),
       closeServer(this.guestServer)
     ]);
     if (process.platform !== "win32") {

@@ -19,6 +19,8 @@ export interface ParsedCliOptions {
   configArgs: string[];
   configPath?: string;
   overrides: BrokerConfigFile;
+  brokerHost?: string;
+  brokerPort?: number;
 }
 
 const COMMANDS = new Set<string>(CLI_COMMANDS);
@@ -29,6 +31,8 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
   const commandArgs: string[] = [];
   const configArgs: string[] = [];
   const overrides: BrokerConfigFile = {};
+  let brokerHost: string | undefined;
+  let brokerPort: number | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -50,6 +54,29 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       if (!Number.isInteger(port)) throw new Error("CLI_INVALID:--port");
       overrides.guestPort = port;
       configArgs.push("--port", value);
+      continue;
+    }
+    if (option.name === "--broker-host") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      if (!value.trim()) throw new Error("CLI_INVALID:--broker-host");
+      brokerHost = value.trim();
+      continue;
+    }
+    if (option.name === "--broker-port") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      const port = Number(value);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("CLI_INVALID:--broker-port");
+      brokerPort = port;
+      overrides.adapterPort = port;
+      configArgs.push("--adapter-port", value);
+      continue;
+    }
+    if (option.name === "--adapter-port") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      const port = Number(value);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("CLI_INVALID:--adapter-port");
+      overrides.adapterPort = port;
+      configArgs.push("--adapter-port", value);
       continue;
     }
     if (option.name === "--config") {
@@ -100,6 +127,8 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     configArgs,
     ...(configPath ? { configPath } : {}),
     overrides
+    , ...(brokerHost ? { brokerHost } : {})
+    , ...(brokerPort !== undefined ? { brokerPort } : {})
   };
 }
 

@@ -56,6 +56,7 @@ async function config(root: string, port: number, upstreamHost?: string, upstrea
     env: { LOCALAPPDATA: root },
     overrides: {
       guestPort: port,
+      adapterPort: await freePort(),
       stateDir: join(root, `state-${port}`),
       ...(upstreamHost && upstreamPort ? { upstreamHost, upstreamPort } : {})
     }
