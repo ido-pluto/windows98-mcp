@@ -133,9 +133,18 @@ jobs:
           mkdir -p "$stage"
           cp -R "$app" "$stage/"
           bundled_app="$stage/$(basename "$app")"
-          test -f "$bundled_app/Contents/Resources/resources/broker-sidecar/windows98-mcp-broker"
+          sidecar="$bundled_app/Contents/Resources/resources/broker-sidecar/windows98-mcp-broker"
+          test -f "$sidecar"
+          codesign --force --sign - "$sidecar"
           codesign --force --deep --sign - "$bundled_app"
           codesign --verify --deep --strict --verbose=2 "$bundled_app"
+          file "$sidecar" | grep -qi 'arm64'
+          "$sidecar" broker --port 19898 > broker-sidecar.log 2>&1 &
+          sidecar_pid=$!
+          for _ in $(seq 1 30); do test -S /tmp/win98-mcp-19898.sock && break; sleep 0.1; done
+          test -S /tmp/win98-mcp-19898.sock
+          kill "$sidecar_pid"
+          wait "$sidecar_pid" || true
           cp admin/README.md "$stage/README.TXT"
           ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
       - uses: actions/upload-artifact@v7
