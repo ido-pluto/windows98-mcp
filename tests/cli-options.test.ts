@@ -23,6 +23,20 @@ describe("CLI options", () => {
     });
   });
 
+  it("accepts the desktop sidecar's local transfer request", () => {
+    expect(parseCliArgs([
+      "client-transfer",
+      "--broker-host", "100.79.57.62",
+      "--broker-port", "9899",
+      "--transfer-request", '{"method":"file_push","params":{}}'
+    ])).toMatchObject({
+      command: "client-transfer",
+      brokerHost: "100.79.57.62",
+      brokerPort: 9899,
+      transferRequest: '{"method":"file_push","params":{}}'
+    });
+  });
+
   it("rejects removed guest filtering/configuration options", () => {
     expect(() => parseCliArgs(["--ip", "192.168.60.128"])).toThrow("CLI_UNKNOWN_OPTION:--ip");
     expect(() => parseCliArgs(["configure"])).toThrow("UNKNOWN_COMMAND:configure");

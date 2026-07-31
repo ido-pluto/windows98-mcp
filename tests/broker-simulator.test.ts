@@ -20,6 +20,8 @@ import {
   type BrokerClient
 } from "../src/host/index.js";
 import { SimulatedGuest } from "../src/simulator/index.js";
+import { BrokerClient as TcpBrokerClient } from "../src/mcp/broker-client.js";
+import { ClientTransferRunner } from "../src/mcp/client-transfers.js";
 
 interface Harness {
   broker: Broker;
@@ -80,6 +82,56 @@ describe("broker with deterministic guest", () => {
     const position = await contender.call("mouse_position");
     expect(position.result.data).toMatchObject({ x: 42, y: 24 });
     await contender.call("vm_unlock", { force: true });
+  });
+
+  it("lists adapters, disconnects another lease owner, and sanitizes before handoff", async () => {
+    const harness = await createHarness();
+    const owner = await createClient(harness, "disconnect-owner");
+    const admin = await createClient(harness, "disconnect-admin");
+
+    expect((await owner.call("mouse_position")).result.ok).toBe(true);
+    const sessions = await admin.call("broker_sessions");
+    expect(sessions.result.data).toMatchObject({
+      lockingEnabled: true,
+      sessions: expect.arrayContaining([
+        expect.objectContaining({ sessionId: owner.sessionId, label: "disconnect-owner", holdsLease: true }),
+        expect.objectContaining({ sessionId: admin.sessionId, current: true })
+      ])
+    });
+
+    const disconnected = await admin.call("broker_disconnect_session", { session_id: owner.sessionId });
+    expect(disconnected.result.ok).toBe(true);
+    await waitFor(() => !owner.connected, 2_000);
+    await waitFor(() => !harness.broker.lease.currentOwner, 2_000);
+
+    expect((await admin.call("mouse_position")).result.ok).toBe(true);
+    await admin.call("vm_unlock", { force: true });
+  });
+
+  it("allows advisory parallel operations only after exclusive owner releases", async () => {
+    const harness = await createHarness();
+    const first = await createClient(harness, "parallel-first");
+    const second = await createClient(harness, "parallel-second");
+
+    expect((await first.call("mouse_position")).result.ok).toBe(true);
+    expect((await second.call("broker_set_locking", { enabled: false })).result).toMatchObject({
+      ok: false,
+      code: "VM_BUSY"
+    });
+    await first.call("vm_unlock", { force: true });
+
+    expect((await second.call("broker_set_locking", { enabled: false })).result).toMatchObject({
+      ok: true,
+      data: { lockingEnabled: false }
+    });
+    expect((await first.call("mouse_position")).result.ok).toBe(true);
+    expect((await second.call("mouse_position")).result.ok).toBe(true);
+    const status = await second.call("vm_status");
+    expect(status.result.data).toMatchObject({
+      lease: { held: false, lockingEnabled: false }
+    });
+    expect((await first.call("vm_unlock")).result.code).toBe("LOCKING_DISABLED");
+    expect((await second.call("broker_set_locking", { enabled: true })).result.ok).toBe(true);
   });
 
   it("round-trips clipboard, shell, filesystem, and input batch", async () => {
@@ -338,6 +390,55 @@ describe("broker with deterministic guest", () => {
       expect(await readFile(destination)).toEqual(contents);
     } finally {
       await client.call("vm_unlock", { force: true });
+    }
+  });
+
+  it("runs verified transfers on the TCP client's local filesystem", async () => {
+    const harness = await createHarness();
+    const source = path.join(harness.root, "mac-client", "source.bin");
+    const pulled = path.join(harness.root, "mac-client", "pulled.bin");
+    const sourceDirectory = path.join(harness.root, "mac-client", "directory-source");
+    const pulledDirectory = path.join(harness.root, "mac-client", "directory-pulled");
+    const contents = deterministicBytes(64 * 1024 + 117);
+    await mkdir(path.dirname(source), { recursive: true });
+    await writeFile(source, contents);
+    await mkdir(path.join(sourceDirectory, "nested"), { recursive: true });
+    await writeFile(path.join(sourceDirectory, "nested", "marker.txt"), "client-side directory transfer", "utf8");
+    const tcpClient = new TcpBrokerClient({
+      host: "127.0.0.1",
+      port: harness.config.adapterPort,
+      sessionLabel: "macos-tcp-client-transfer",
+      requestTimeoutMs: 10_000
+    });
+    const transfer = new ClientTransferRunner(tcpClient);
+    try {
+      const pushed = await transfer.execute("file_push", {
+        host_path: source,
+        guest_path: "C:\\MCPTEST\\TCP-CLIENT.BIN"
+      });
+      expect(pushed).toMatchObject({ direction: "host-to-guest", bytes: contents.length, sha256: expect.any(String) });
+      const downloaded = await transfer.execute("file_pull", {
+        guest_path: "C:\\MCPTEST\\TCP-CLIENT.BIN",
+        host_path: pulled
+      });
+      expect(downloaded).toMatchObject({ direction: "guest-to-host", bytes: contents.length, sha256: expect.any(String) });
+      expect(await readFile(pulled)).toEqual(contents);
+      const pushedDirectory = await transfer.execute("directory_push", {
+        host_path: sourceDirectory,
+        guest_path: "C:\\MCPTEST\\TCP-DIRECTORY"
+      });
+      expect(pushedDirectory).toMatchObject({ direction: "host-to-guest", files: 1, directories: 1 });
+      const pulledDirectoryResult = await transfer.execute("directory_pull", {
+        guest_path: "C:\\MCPTEST\\TCP-DIRECTORY",
+        host_path: pulledDirectory
+      });
+      expect(pulledDirectoryResult).toMatchObject({ direction: "guest-to-host", files: 1, directories: 1 });
+      expect(await readFile(path.join(pulledDirectory, "nested", "marker.txt"), "utf8")).toBe("client-side directory transfer");
+      await tcpClient.request("vm_unlock", { force: false });
+    } finally {
+      await transfer.abort().catch(() => undefined);
+      await tcpClient.request("vm_unlock", { force: true }).catch(() => undefined);
+      await tcpClient.close();
     }
   });
 
@@ -691,6 +792,7 @@ async function createHarness(): Promise<Harness> {
     bindHost: "0.0.0.0",
     guestPort,
     adapterPort,
+    lockingEnabled: true,
     pipePath,
     stateDir: root,
     artifactDir: path.join(root, "artifacts"),

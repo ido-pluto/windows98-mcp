@@ -71,6 +71,7 @@ interface PendingGuestRequest {
 interface AdapterSession {
   id: string;
   label: string;
+  connectedAt: string;
   socket: Socket;
   buffer: string;
   greeted: boolean;
@@ -108,7 +109,10 @@ const NON_LOCKING_METHODS = new Set([
   "vm_wait",
   "vm_unlock",
   "host_network_info",
-  "broker_set_upstream"
+  "broker_set_upstream",
+  "broker_sessions",
+  "broker_disconnect_session",
+  "broker_set_locking"
 ]);
 
 export class Broker {
@@ -336,40 +340,44 @@ export class Broker {
       );
     }
 
-    const acquisition = this.lease.acquire(sessionId, sessionLabel, true);
-    if (!acquisition.acquired) {
-      return this.brokerResponse(
-        requestId,
-        this.result(
-          sessionId,
+    if (this.config.lockingEnabled) {
+      const acquisition = this.lease.acquire(sessionId, sessionLabel, true);
+      if (!acquisition.acquired) {
+        return this.brokerResponse(
           requestId,
-          false,
-          "VM_BUSY",
-          "Another agent owns the Windows 98 VM.",
-          true,
-          "Call vm_wait with the returned ticket, or retry after the current lease expires.",
-          {
-            waitTicket: acquisition.ticket,
-            queuePosition: acquisition.queuePosition,
-            retryAfterMs: 1_000
-          }
-        )
-      );
+          this.result(
+            sessionId,
+            requestId,
+            false,
+            "VM_BUSY",
+            "Another agent owns the Windows 98 VM.",
+            true,
+            "Call vm_wait with the returned ticket, or retry after the current lease expires.",
+            {
+              waitTicket: acquisition.ticket,
+              queuePosition: acquisition.queuePosition,
+              retryAfterMs: 1_000
+            }
+          )
+        );
+      }
+      this.lease.touch(sessionId);
     }
-    this.lease.touch(sessionId);
 
     try {
       const timeout = requestTimeout(method, params, this.config.requestTimeoutMs);
-      const renewalTimer = setInterval(
-        () => this.lease.touch(sessionId),
-        Math.max(1_000, Math.min(60_000, Math.floor(this.config.leaseTtlMs / 3)))
-      );
-      renewalTimer.unref();
+      const renewalTimer = this.config.lockingEnabled
+        ? setInterval(
+            () => this.lease.touch(sessionId),
+            Math.max(1_000, Math.min(60_000, Math.floor(this.config.leaseTtlMs / 3)))
+          )
+        : undefined;
+      renewalTimer?.unref();
       try {
         if (TRANSFER_METHODS.has(method)) {
         let progress;
           progress = await this.transfers.execute(sessionId, method, params);
-        this.lease.touch(sessionId);
+        if (this.config.lockingEnabled) this.lease.touch(sessionId);
         return this.brokerResponse(
           requestId,
           this.result(
@@ -377,10 +385,10 @@ export class Broker {
             requestId,
             true,
             "OK",
-            `${method} completed. ${UNLOCK_REMINDER}`,
+            `${method} completed. ${this.operationReminder()}`,
             false,
             undefined,
-            addUnlockReminder(progress)
+            this.config.lockingEnabled ? addUnlockReminder(progress) : progress
           )
         );
         }
@@ -392,10 +400,12 @@ export class Broker {
           params,
           timeout
         );
-        this.lease.touch(sessionId);
+        if (this.config.lockingEnabled) this.lease.touch(sessionId);
         const processed = await this.processGuestResponse(guestResponse, timeout);
         this.trackResources(sessionId, method, params, processed.response);
-        const data = addUnlockReminder(processed.response.data);
+        const data = this.config.lockingEnabled
+          ? addUnlockReminder(processed.response.data)
+          : processed.response.data;
         return {
           kind: "broker_response",
           id: requestId,
@@ -404,7 +414,7 @@ export class Broker {
             requestId,
             processed.response.ok,
             processed.response.code,
-            `${processed.response.message} ${UNLOCK_REMINDER}`,
+            `${processed.response.message} ${this.operationReminder()}`,
             !processed.response.ok && SAFE_RETRY_METHODS.has(method),
             processed.response.ok ? undefined : remediationForCode(processed.response.code),
             data
@@ -412,10 +422,10 @@ export class Broker {
           ...(processed.image ? { image: processed.image } : {})
         };
       } finally {
-        clearInterval(renewalTimer);
+        if (renewalTimer) clearInterval(renewalTimer);
       }
     } catch (error) {
-      this.lease.touch(sessionId);
+      if (this.config.lockingEnabled) this.lease.touch(sessionId);
       const code = errorCode(error);
       const retryable = SAFE_RETRY_METHODS.has(method);
       const transfer = TRANSFER_METHODS.has(method);
@@ -433,7 +443,7 @@ export class Broker {
           requestId,
           false,
           reportedCode,
-          `${errorMessage(error)} ${UNLOCK_REMINDER}`,
+          `${errorMessage(error)} ${this.operationReminder()}`,
           retryable,
           transfer
             ? "Correct the reported path or transfer error and retry. Directory transfers merge, so already committed files remain."
@@ -460,7 +470,10 @@ export class Broker {
         requestId,
         this.result(sessionId, requestId, true, "OK", "Broker status.", false, undefined, {
           connection: this.snapshot,
-          lease: this.lease.snapshot(sessionId),
+          lease: {
+            ...this.lease.snapshot(sessionId),
+            lockingEnabled: this.config.lockingEnabled
+          },
           broker: publicConfig(this.config)
         })
       );
@@ -561,6 +574,109 @@ export class Broker {
         )
       );
     }
+    if (method === "broker_sessions") {
+      return this.brokerResponse(
+        requestId,
+        this.result(sessionId, requestId, true, "OK", "Connected broker adapter sessions.", false, undefined, {
+          lockingEnabled: this.config.lockingEnabled,
+          sessions: [...this.adapters.values()].map((adapter) => ({
+            sessionId: adapter.id,
+            label: adapter.label,
+            connectedAt: adapter.connectedAt,
+            current: adapter.id === sessionId,
+            holdsLease: this.lease.currentOwner?.sessionId === adapter.id,
+            resources: [...(this.openResources.get(adapter.id) ?? [])]
+          }))
+        })
+      );
+    }
+    if (method === "broker_disconnect_session") {
+      const targetSessionId = typeof params["session_id"] === "string"
+        ? params["session_id"]
+        : typeof params["sessionId"] === "string" ? params["sessionId"] : "";
+      if (!targetSessionId) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, false, "INVALID_ARGUMENT", "session_id is required.", false
+        ));
+      }
+      if (targetSessionId === sessionId) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, false, "CANNOT_DISCONNECT_SELF", "Close this admin app or MCP process to disconnect its own session.", false
+        ));
+      }
+      const target = this.adapters.get(targetSessionId);
+      if (!target) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, false, "SESSION_NOT_FOUND", "The requested agent session is no longer connected.", false
+        ));
+      }
+      target.socket.destroy();
+      this.logger.write("warn", "adapter_disconnect_requested", {
+        requestedBy: sessionId,
+        targetSessionId,
+        targetLabel: target.label
+      });
+      return this.brokerResponse(requestId, this.result(
+        sessionId,
+        requestId,
+        true,
+        "OK",
+        "Disconnect requested. If that agent owned the exclusive lease, cleanup and release are now running.",
+        false,
+        undefined,
+        { targetSessionId, cleanupPending: this.config.lockingEnabled && this.lease.currentOwner?.sessionId === targetSessionId }
+      ));
+    }
+    if (method === "broker_set_locking") {
+      const enabled = params["enabled"];
+      if (typeof enabled !== "boolean") {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, false, "INVALID_ARGUMENT", "enabled must be true or false.", false
+        ));
+      }
+      if (enabled === this.config.lockingEnabled) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, true, "OK", enabled ? "Exclusive locking is already enabled." : "Exclusive locking is already disabled.", false,
+          undefined, { lockingEnabled: enabled }
+        ));
+      }
+      if (this.lease.currentOwner) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId,
+          requestId,
+          false,
+          "VM_BUSY",
+          "Disconnect or unlock the current lease owner before changing exclusive locking.",
+          true,
+          "Use the Agents panel to disconnect the owner, then apply the change again."
+        ));
+      }
+      if (enabled && this.openResources.size > 0) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId,
+          requestId,
+          false,
+          "RESOURCES_ACTIVE",
+          "Close active terminals and transfers before re-enabling exclusive locking.",
+          false
+        ));
+      }
+      this.lease.clearWaiters();
+      this.config.lockingEnabled = enabled;
+      this.logger.write("warn", "exclusive_locking_changed", { enabled, requestedBy: sessionId });
+      return this.brokerResponse(requestId, this.result(
+        sessionId,
+        requestId,
+        true,
+        "OK",
+        enabled
+          ? "Exclusive locking enabled. VM work will again use one lease owner."
+          : "Exclusive locking disabled. Agents may issue concurrent requests; mouse and keyboard actions can collide.",
+        false,
+        undefined,
+        { lockingEnabled: enabled }
+      ));
+    }
     if (method === "vm_capabilities") {
       if (!this.capabilities) {
         return this.brokerResponse(
@@ -590,6 +706,12 @@ export class Broker {
       );
     }
     if (method === "vm_lock") {
+      if (!this.config.lockingEnabled) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, true, "LOCKING_DISABLED",
+          "Exclusive locking is disabled; this session may operate concurrently with other agents.", false
+        ));
+      }
       const acquisition = this.lease.acquire(sessionId, sessionLabel, true);
       return this.brokerResponse(
         requestId,
@@ -619,6 +741,12 @@ export class Broker {
       );
     }
     if (method === "vm_wait") {
+      if (!this.config.lockingEnabled) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, true, "LOCKING_DISABLED",
+          "Exclusive locking is disabled; no lease wait is needed.", false
+        ));
+      }
       const seconds = boundedNumber(params["wait_seconds"], 10, 0, 600);
       const ticketId =
         typeof params["ticket_id"] === "string" ? params["ticket_id"] : undefined;
@@ -657,6 +785,26 @@ export class Broker {
     }
 
     const force = params["force"] === true;
+    if (!this.config.lockingEnabled) {
+      const resources = this.openResources.get(sessionId);
+      if (!force && resources && resources.size > 0) {
+        return this.brokerResponse(requestId, this.result(
+          sessionId, requestId, false, "RESOURCES_ACTIVE",
+          "Close this session's terminal or transfer resources before finishing.", false,
+          "Close the listed resources, or call vm_unlock with force=true.",
+          { resources: [...resources] }
+        ));
+      }
+      await this.enqueueCleanup(sessionId, "explicit_unlock_parallel", force, false);
+      return this.brokerResponse(requestId, this.result(
+        sessionId,
+        requestId,
+        true,
+        "LOCKING_DISABLED",
+        "This session's resources were released. Exclusive locking remains disabled.",
+        false
+      ));
+    }
     if (this.lease.currentOwner?.sessionId !== sessionId) {
       this.lease.disconnect(sessionId);
       return this.brokerResponse(
@@ -760,6 +908,7 @@ export class Broker {
     const adapter: AdapterSession = {
       id: provisionalId,
       label: "unidentified adapter",
+      connectedAt: new Date().toISOString(),
       socket,
       buffer: "",
       greeted: false,
@@ -847,6 +996,10 @@ export class Broker {
     });
     if (relation === "owner") {
       void this.enqueueCleanup(adapter.id, "adapter_disconnect", true, true);
+    } else if (!this.config.lockingEnabled) {
+      // In advisory parallel mode there is no lease owner, but this adapter
+      // can still own broker-tracked terminal or transfer resources.
+      void this.enqueueCleanup(adapter.id, "adapter_disconnect_parallel", true, false);
     }
   }
 
@@ -975,6 +1128,22 @@ export class Broker {
     releaseOwner: boolean
   ): Promise<CleanupOutcome> {
     const operation = this.cleanupChain.then(async () => {
+      if (!this.config.lockingEnabled) {
+        let cleanupFailed = false;
+        try {
+          await this.transfers.abortSession(sessionId);
+          await this.closeSessionResources(sessionId);
+        } catch (error) {
+          cleanupFailed = true;
+          this.logger.write("error", "parallel_session_cleanup_failed", {
+            error,
+            sessionId,
+            reason
+          });
+        }
+        this.openResources.delete(sessionId);
+        return { sanitized: !cleanupFailed, pendingReconnect: false };
+      }
       this.lease.setBlocked(true);
       let sanitized = false;
       let cleanupFailed = false;
@@ -1040,6 +1209,40 @@ export class Broker {
       () => undefined
     );
     return await operation;
+  }
+
+  private async closeSessionResources(sessionId: string): Promise<void> {
+    const resources = [...(this.openResources.get(sessionId) ?? [])];
+    const guest = this.guest;
+    if (!guest?.ready || guest.closed) return;
+    for (const resource of resources) {
+      if (resource.startsWith("terminal:")) {
+        const terminalId = resource.slice("terminal:".length);
+        try {
+          await guest.request(sessionId, "shell_terminate", { session_id: terminalId }, 10_000);
+        } catch {
+          // A terminal can have exited between resource tracking and cleanup.
+        }
+        try {
+          await guest.request(sessionId, "shell_close", { session_id: terminalId }, 10_000);
+        } catch {
+          // The guest may already have cleaned the terminal after a failure.
+        }
+      } else if (resource.startsWith("guest-transfer:")) {
+        const transferId = resource.slice("guest-transfer:".length);
+        try {
+          await guest.request(sessionId, "file_write_abort", { transferId }, 10_000);
+        } catch {
+          // The partial remains resumable even when the guest has disconnected.
+        }
+      }
+    }
+  }
+
+  private operationReminder(): string {
+    return this.config.lockingEnabled
+      ? UNLOCK_REMINDER
+      : "Exclusive locking is disabled; concurrent mouse and keyboard actions can collide.";
   }
 
   private async processGuestResponse(
@@ -1119,6 +1322,18 @@ export class Broker {
       const id = params["session_id"] ?? params["sessionId"];
       if (typeof id === "string") {
         resources.delete(`terminal:${id}`);
+      }
+    }
+    if (method === "file_write_begin" && isRecord(response.data)) {
+      const id = response.data["transferId"];
+      if (typeof id === "string") {
+        resources.add(`guest-transfer:${id}`);
+      }
+    }
+    if (method === "file_write_commit" || method === "file_write_abort") {
+      const id = params["transferId"];
+      if (typeof id === "string") {
+        resources.delete(`guest-transfer:${id}`);
       }
     }
     if (resources.size === 0) {
@@ -1305,6 +1520,10 @@ class GuestConnection {
   private rxSequence = 1n;
   private nextStreamId = 1;
   private readonly pending = new Map<string, PendingGuestRequest>();
+  // Windows 98 executes one request at a time.  Advisory parallel mode still
+  // accepts calls from several adapters, but queues frames here so clients do
+  // not receive a spurious guest-level VM_BUSY race.
+  private advisoryRequestChain: Promise<void> = Promise.resolve();
   private readonly streams: IncomingStreamRegistry;
   private frameChain: Promise<void> = Promise.resolve();
   private handshakeTimer: NodeJS.Timeout | undefined;
@@ -1355,6 +1574,29 @@ class GuestConnection {
   }
 
   async request(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<GuestResponse> {
+    if (
+      !this.config.lockingEnabled &&
+      method !== "session_abort" &&
+      method !== "sanitize"
+    ) {
+      const operation = this.advisoryRequestChain.then(() =>
+        this.requestNow(sessionId, method, params, timeoutMs)
+      );
+      this.advisoryRequestChain = operation.then(
+        () => undefined,
+        () => undefined
+      );
+      return await operation;
+    }
+    return await this.requestNow(sessionId, method, params, timeoutMs);
+  }
+
+  private async requestNow(
     sessionId: string,
     method: string,
     params: Record<string, unknown>,

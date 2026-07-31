@@ -119,6 +119,13 @@ diagnostics [dir]   Collect sanitized diagnostics
 TCP port `9899` by default; use `--broker-host` and `--broker-port` to attach
 an MCP session to a broker on another host, for example over Tailscale.
 
+When MCP uses a TCP broker endpoint, `file_push`, `file_pull`,
+`directory_push`, and `directory_pull` operate on the filesystem of the
+machine running `npx windows98-mcp`—for example, the Mac client—not on the
+remote Windows broker. The transfer itself is sent through the broker-control
+connection in 64 KiB CRC32-checked chunks, with SHA-256 verification and
+resumable partial files.
+
 ## MCP tools
 
 The tool groups are:
@@ -135,7 +142,15 @@ The tool groups are:
 The first VM-affecting tool atomically acquires the lease. Every operational
 result reminds callers to release it with `vm_unlock`. Inactive leases expire
 after 30 minutes; disconnect cleanup releases held keys, buttons, terminals,
-and transfers.
+and transfers. The Admin app's **Connected agents** panel can disconnect a
+different MCP/admin session; if it owns the lease, the broker cleans it up and
+releases the VM automatically.
+
+The Admin app can turn off **Exclusive lock agents** for a broker. This is a
+broker-wide advisory parallel mode: two agents can send VM calls without
+waiting, but Windows has one real mouse and keyboard, so simultaneous input can
+collide. In that mode a disconnect closes only the disconnected agent's
+broker-tracked terminals and transfers; do not use it for coordinated input.
 
 ## Development
 

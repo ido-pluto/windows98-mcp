@@ -8,6 +8,8 @@ import { PACKAGE_NAME, PACKAGE_VERSION } from "../shared/package-info.js";
 import type { BrokerResponse, ToolResult } from "../shared/types.js";
 import { UNLOCK_REMINDER } from "../shared/types.js";
 import { BrokerClient, BrokerClientError } from "./broker-client.js";
+import { ClientTransferRunner } from "./client-transfers.js";
+import { TRANSFER_METHODS } from "../host/transfers.js";
 
 export const MCP_SERVER_INSTRUCTIONS = `LOCKING AND CLEANUP ARE MANDATORY:
 1. vm_status and vm_capabilities are the only calls that never acquire the VM lease.
@@ -686,6 +688,11 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ];
 
 export function createMcpServer(client: BrokerClient): McpServer {
+  // A TCP broker can be on another computer. In that case transfer paths must
+  // belong to this MCP process, not to the broker machine.
+  const clientTransfers = client.host
+    ? new ClientTransferRunner(client)
+    : undefined;
   const server = new McpServer(
     {
       name: PACKAGE_NAME,
@@ -707,16 +714,42 @@ export function createMcpServer(client: BrokerClient): McpServer {
           ...definition.annotations
         }
       },
-      async (params) =>
-        await invokeBrokerTool(
-          client,
-          definition.name,
-          params as Record<string, unknown>
-        )
+      async (params) => {
+        const transferParams = params as Record<string, unknown>;
+        if (clientTransfers && TRANSFER_METHODS.has(definition.name)) {
+          return await invokeClientTransfer(
+            clientTransfers,
+            definition.name,
+            transferParams
+          );
+        }
+        return await invokeBrokerTool(client, definition.name, transferParams);
+      }
     );
   }
 
   return server;
+}
+
+async function invokeClientTransfer(
+  transfers: ClientTransferRunner,
+  method: string,
+  params: Record<string, unknown>
+): Promise<CallToolResult> {
+  try {
+    const progress = await transfers.execute(method, params);
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        ok: true,
+        code: "OK",
+        message: `${method} completed from the MCP client's local filesystem. ${UNLOCK_REMINDER}`,
+        data: { ...progress, unlockReminder: UNLOCK_REMINDER }
+      }, null, 2) }]
+    };
+  } catch (error) {
+    await transfers.abort().catch(() => undefined);
+    return localErrorToMcp(error);
+  }
 }
 
 async function invokeBrokerTool(

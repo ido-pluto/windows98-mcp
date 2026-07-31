@@ -61,6 +61,7 @@ async function createBroker(excludedPort?: number): Promise<{ broker: Broker; ro
     bindHost: "0.0.0.0",
     guestPort,
     adapterPort,
+    lockingEnabled: true,
     pipePath: defaultPipePath(guestPort),
     stateDir: root,
     artifactDir: path.join(root, "artifacts"),

@@ -12,6 +12,8 @@ import {
   type BrokerConfig
 } from "./host/index.js";
 import { startStdioMcp } from "./mcp/index.js";
+import { BrokerClient } from "./mcp/broker-client.js";
+import { ClientTransferRunner } from "./mcp/client-transfers.js";
 import { EXPECTED_GUEST_BUILD_ID } from "./shared/build-info.js";
 import { PACKAGE_VERSION } from "./shared/package-info.js";
 import { SimulatedGuest, writeSimulatorFixture } from "./simulator/index.js";
@@ -43,6 +45,9 @@ async function main(): Promise<void> {
         break;
       case "diagnostics":
         await runDiagnostics();
+        break;
+      case "client-transfer":
+        await runClientTransfer();
         break;
       case "version":
         process.stdout.write(`${PACKAGE_VERSION}\n`);
@@ -169,6 +174,55 @@ async function runDiagnostics(): Promise<void> {
   process.stdout.write(`${result}\n`);
 }
 
+/**
+ * Used by the packaged desktop app. The sidecar runs on the desktop client's
+ * machine, so paths in the request are always local even when the broker is
+ * reached over TCP on another computer.
+ */
+async function runClientTransfer(): Promise<void> {
+  if (!cli.transferRequest) throw new Error("CLI_VALUE_REQUIRED:--transfer-request");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cli.transferRequest) as unknown;
+  } catch {
+    throw new Error("CLI_INVALID:--transfer-request");
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !("method" in parsed) ||
+    typeof parsed.method !== "string" ||
+    !("params" in parsed) ||
+    !parsed.params ||
+    typeof parsed.params !== "object" ||
+    Array.isArray(parsed.params)
+  ) {
+    throw new Error("CLI_INVALID:--transfer-request");
+  }
+  const config = await loadCliConfig();
+  const client = new BrokerClient({
+    host: cli.brokerHost ?? "127.0.0.1",
+    port: cli.brokerPort ?? config.adapterPort,
+    sessionLabel: `admin-client-transfer:${process.pid}`,
+    requestTimeoutMs: 11 * 60 * 1_000
+  });
+  const transfer = new ClientTransferRunner(client, (progress) => {
+    process.stdout.write(`${JSON.stringify({ kind: "transfer_progress", progress })}\n`);
+  });
+  try {
+    const data = await transfer.execute(parsed.method, parsed.params as Record<string, unknown>);
+    await client.request("vm_unlock", {}, { timeoutMs: 30_000 });
+    process.stdout.write(`${JSON.stringify({ kind: "transfer_result", ok: true, data })}\n`);
+  } catch (error) {
+    await transfer.abort().catch(() => undefined);
+    await client.request("vm_unlock", { force: true }, { timeoutMs: 30_000 }).catch(() => undefined);
+    process.stdout.write(`${JSON.stringify({ kind: "transfer_result", ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
+    process.exitCode = 2;
+  } finally {
+    await client.close();
+  }
+}
+
 async function ensureBroker(config: BrokerConfig): Promise<void> {
   if (await brokerIsReachable(config.pipePath)) return;
   const entry = process.argv[1];
@@ -230,6 +284,7 @@ With no command, the stdio MCP adapter starts for npx-based MCP clients.
   simulator           Run the deterministic simulated Windows 98 guest
   smoke-test          Exercise the connected guest safely
   diagnostics [dir]   Collect sanitized diagnostics
+  client-transfer     Internal desktop-client transfer runner
 
 Network and configuration options:
   --port <port>       Guest listener port (default: 9898)

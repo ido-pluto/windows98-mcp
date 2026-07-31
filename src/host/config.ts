@@ -8,6 +8,8 @@ export interface BrokerConfig {
   guestPort: number;
   /** TCP port for admin/MCP adapters, including adapters on another machine. */
   adapterPort: number;
+  /** Whether the broker serializes VM-affecting calls into one lease owner. */
+  lockingEnabled: boolean;
   /** When set, this broker transparently relays its guest connection upstream. */
   upstreamHost?: string;
   upstreamPort?: number;
@@ -26,6 +28,7 @@ export interface BrokerConfig {
 export interface BrokerConfigFile {
   guestPort?: number;
   adapterPort?: number;
+  lockingEnabled?: boolean;
   upstreamHost?: string;
   upstreamPort?: number;
   stateDir?: string;
@@ -51,6 +54,7 @@ interface RuntimeSettings {
   brokerPort?: number;
   upstreamHost?: string;
   upstreamPort?: number;
+  lockingEnabled?: boolean;
 }
 
 const DEFAULT_PORT = 9898;
@@ -93,6 +97,10 @@ export async function loadBrokerConfig(
     1,
     65535
   );
+  const lockingEnabled = boolean(
+    options.overrides?.lockingEnabled ?? merged.lockingEnabled ?? runtime.lockingEnabled ?? true,
+    "lockingEnabled"
+  );
   const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");
   const configuredUpstreamHost = options.overrides?.upstreamHost ?? merged.upstreamHost ?? runtime.upstreamHost;
   const upstreamHost = typeof configuredUpstreamHost === "string" && configuredUpstreamHost.trim()
@@ -120,6 +128,7 @@ export async function loadBrokerConfig(
     bindHost: "0.0.0.0",
     guestPort,
     adapterPort,
+    lockingEnabled,
     ...upstream,
     pipePath: defaultPipePath(guestPort),
     stateDir,
@@ -190,6 +199,13 @@ function integer(value: number, label: string, min: number, max: number): number
   return value;
 }
 
+function boolean(value: boolean, label: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`CONFIG_INVALID:${label}`);
+  }
+  return value;
+}
+
 function defaultAdapterPort(guestPort: number): number {
   return guestPort === DEFAULT_PORT || guestPort === 65_535
     ? DEFAULT_ADAPTER_PORT
@@ -212,7 +228,7 @@ async function loadRuntimeSettings(env: NodeJS.ProcessEnv, cwd: string): Promise
   try {
     const text = await readFile(path, "utf8");
     const parsed = JSON.parse(text.replace(/^\uFEFF/u, "")) as RuntimeSettings;
-    return typeof parsed.port === "number" || typeof parsed.brokerPort === "number" ? parsed : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     void cwd;

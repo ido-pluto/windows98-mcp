@@ -7,13 +7,14 @@ import { request, requestWithImage, showMessage, status, testConnection } from "
 import type { BrokerStatus } from "./types";
 import "./styles.css";
 
-type Settings = { port: number; brokerHost: string; brokerPort: number; upstreamEnabled: boolean; upstreamHost: string; upstreamPort: number };
+type Settings = { port: number; brokerHost: string; brokerPort: number; lockingEnabled: boolean; upstreamEnabled: boolean; upstreamHost: string; upstreamPort: number };
 type HostAddress = { name: string; address: string; netmask: string; virtual: boolean };
 type GuestEntry = { name: string; isDirectory: boolean; size?: number };
+type AgentSession = { sessionId: string; label: string; connectedAt: string; current: boolean; holdsLease: boolean; resources: string[] };
 type PickerMode = "upload-destination" | "download-file" | "download-directory";
 type TransferProgress = { direction: string; files: number; directories: number; bytes: number; chunks: number; totalBytes?: number; totalFiles?: number; currentPath?: string; startedAt: number };
 
-const defaultSettings: Settings = { port: 9898, brokerHost: "127.0.0.1", brokerPort: 9899, upstreamEnabled: false, upstreamHost: "", upstreamPort: 9898 };
+const defaultSettings: Settings = { port: 9898, brokerHost: "127.0.0.1", brokerPort: 9899, lockingEnabled: true, upstreamEnabled: false, upstreamHost: "", upstreamPort: 9898 };
 const asText = (value: unknown) => JSON.stringify(value, null, 2);
 const parentPath = (path: string) => path.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]+$/, "") || "C:\\";
 const childPath = (path: string, name: string) => `${path.replace(/[\\/]+$/, "")}\\${name}`;
@@ -23,6 +24,7 @@ const formatDuration = (seconds: number) => seconds < 60 ? `${Math.ceil(seconds)
 function App() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [connection, setConnection] = useState<BrokerStatus>();
+  const [agentSessions, setAgentSessions] = useState<AgentSession[]>([]);
   const [notice, setNotice] = useState("Starting broker…");
   const [addresses, setAddresses] = useState<HostAddress[]>([]);
   const [selectedAddress, setSelectedAddress] = useState("");
@@ -45,7 +47,15 @@ function App() {
   const [pickerEntries, setPickerEntries] = useState<GuestEntry[]>([]);
 
   const refresh = useCallback(async () => {
-    try { setConnection(await status()); setNotice("Ready"); }
+    try {
+      const [nextConnection, agentData] = await Promise.all([
+        status(),
+        request<{ sessions?: AgentSession[] }>("broker_sessions")
+      ]);
+      setConnection(nextConnection);
+      setAgentSessions(agentData.sessions ?? []);
+      setNotice("Ready");
+    }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }, []);
 
@@ -88,8 +98,17 @@ function App() {
     if (!Number.isInteger(settings.port) || settings.port < 1 || settings.port > 65535 || !Number.isInteger(settings.brokerPort) || settings.brokerPort < 1 || settings.brokerPort > 65535 || !Number.isInteger(settings.upstreamPort) || settings.upstreamPort < 1 || settings.upstreamPort > 65535) { setNotice("Ports must be between 1 and 65535."); return; }
     if (settings.upstreamEnabled && !settings.upstreamHost.trim()) { setNotice("Set the remote broker IP before enabling proxy."); return; }
     if (shellId || transferActive) { setNotice("Close active terminal or transfer work before changing connection settings."); return; }
+    if (!settings.lockingEnabled && connection?.lease?.lockingEnabled !== false && !window.confirm("Disable exclusive locking for every connected agent? Requests may run concurrently, and mouse or keyboard actions can collide.")) return;
     try { await invoke("save_settings", { settings }); await invoke("restart_broker", { settings }); setNotice(settings.upstreamEnabled ? `Connecting to ${settings.upstreamHost}:${settings.upstreamPort}…` : `Connected to broker ${settings.brokerHost}:${settings.brokerPort}.`); await refresh(); }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+  }
+  async function disconnectAgent(agent: AgentSession) {
+    if (!window.confirm(`Disconnect ${agent.label}? Any exclusive VM lease it owns will be cleaned up and released.`)) return;
+    try {
+      await request("broker_disconnect_session", { session_id: agent.sessionId });
+      setNotice(`Disconnect requested for ${agent.label}.`);
+      window.setTimeout(() => void refresh(), 250);
+    } catch (error) { setNotice(String(error)); }
   }
   async function sendMessage() { if (!message.trim()) return; try { await showMessage(message); setMessage(""); setNotice("Message sent to Windows 98."); } catch (error) { setNotice(String(error)); } finally { await releaseVm(); } }
   async function runCommand() {
@@ -125,7 +144,15 @@ function App() {
     setTransferActive(true);
     // Let React paint the progress area before the broker operation starts.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    try { await request(`${directory ? "directory" : "file"}_${direction}`, direction === "push" ? { host_path: hostPath, guest_path: guestPath, overwrite } : { guest_path: guestPath, host_path: hostPath, overwrite }); setNotice(`${directory ? "Directory" : "File"} ${direction} completed.`); }
+    try {
+      await invoke("client_transfer", {
+        method: `${directory ? "directory" : "file"}_${direction}`,
+        params: direction === "push"
+          ? { host_path: hostPath, guest_path: guestPath, overwrite }
+          : { guest_path: guestPath, host_path: hostPath, overwrite }
+      });
+      setNotice(`${directory ? "Directory" : "File"} ${direction} completed.`);
+    }
     catch (error) { setNotice(String(error)); }
     finally { setTransferActive(false); setTransferProgress(undefined); await releaseVm(); }
   }
@@ -140,7 +167,8 @@ function App() {
 
   return <main className="win98">
     <p className="statusline"><b>{connectionText}</b> — {settings.upstreamEnabled && proxyConnected ? "Proxy is active. Use MCP or the admin app on the remote machine to control the VM." : notice}</p>
-    <fieldset><legend>Broker and VM connection</legend><div className="form-grid"><label>Broker host / IP <input value={settings.brokerHost} onChange={(e) => setSettings({ ...settings, brokerHost: e.target.value })} placeholder="127.0.0.1" /></label><label>Broker control port <input type="number" min="1" max="65535" value={settings.brokerPort} onChange={(e) => setSettings({ ...settings, brokerPort: Number(e.target.value) })} /></label><label>Guest listener port <input type="number" min="1" max="65535" value={settings.port} onChange={(e) => setSettings({ ...settings, port: Number(e.target.value) })} /></label><button disabled={!!shellId || transferActive} onClick={() => void applySettings()}>Apply</button><button onClick={() => void testConnection().then(setConnection).catch((e) => setNotice(String(e)))}>Wait / test</button><label className="check"><input type="checkbox" checked={settings.upstreamEnabled} onChange={(e) => setSettings({ ...settings, upstreamEnabled: e.target.checked })} /> Proxy upward to remote broker</label><label>Remote broker IP <input disabled={!settings.upstreamEnabled} value={settings.upstreamHost} onChange={(e) => setSettings({ ...settings, upstreamHost: e.target.value })} placeholder="192.168.1.50" /></label><label>Remote broker port <input disabled={!settings.upstreamEnabled} type="number" min="1" max="65535" value={settings.upstreamPort} onChange={(e) => setSettings({ ...settings, upstreamPort: Number(e.target.value) })} /></label></div><dl><dt>Broker endpoint</dt><dd>{settings.brokerHost}:{settings.brokerPort}</dd><dt>VM address</dt><dd>{connection?.connection.remoteAddress ?? "not connected"}</dd><dt>Build</dt><dd>{connection?.connection.guestBuildId ?? "—"}</dd></dl></fieldset>
+    <fieldset><legend>Broker and VM connection</legend><div className="form-grid"><label>Broker host / IP <input value={settings.brokerHost} onChange={(e) => setSettings({ ...settings, brokerHost: e.target.value })} placeholder="127.0.0.1" /></label><label>Broker control port <input type="number" min="1" max="65535" value={settings.brokerPort} onChange={(e) => setSettings({ ...settings, brokerPort: Number(e.target.value) })} /></label><label>Guest listener port <input type="number" min="1" max="65535" value={settings.port} onChange={(e) => setSettings({ ...settings, port: Number(e.target.value) })} /></label><button disabled={!!shellId || transferActive} onClick={() => void applySettings()}>Apply</button><button onClick={() => void testConnection().then(setConnection).catch((e) => setNotice(String(e)))}>Wait / test</button><label className="check"><input type="checkbox" checked={settings.lockingEnabled} onChange={(e) => setSettings({ ...settings, lockingEnabled: e.target.checked })} /> Exclusive lock agents (recommended)</label><label className="check"><input type="checkbox" checked={settings.upstreamEnabled} onChange={(e) => setSettings({ ...settings, upstreamEnabled: e.target.checked })} /> Proxy upward to remote broker</label><label>Remote broker IP <input disabled={!settings.upstreamEnabled} value={settings.upstreamHost} onChange={(e) => setSettings({ ...settings, upstreamHost: e.target.value })} placeholder="192.168.1.50" /></label><label>Remote broker port <input disabled={!settings.upstreamEnabled} type="number" min="1" max="65535" value={settings.upstreamPort} onChange={(e) => setSettings({ ...settings, upstreamPort: Number(e.target.value) })} /></label></div><dl><dt>Broker endpoint</dt><dd>{settings.brokerHost}:{settings.brokerPort}</dd><dt>VM address</dt><dd>{connection?.connection.remoteAddress ?? "not connected"}</dd><dt>Build</dt><dd>{connection?.connection.guestBuildId ?? "—"}</dd><dt>Exclusive locking</dt><dd>{connection?.lease?.lockingEnabled === false ? "Disabled — input may collide" : "Enabled"}</dd></dl></fieldset>
+    <fieldset><legend>Connected agents</legend><p>Disconnecting an agent closes its MCP/admin connection. In exclusive mode, an owner is sanitized and its lease is released automatically.</p><div className="agent-list">{agentSessions.length ? agentSessions.map((agent) => <div className="agent" key={agent.sessionId}><span><b>{agent.label}</b>{agent.current ? " (this admin)" : ""}{agent.holdsLease ? " — holds VM lease" : ""}<small>{agent.resources.length ? ` Resources: ${agent.resources.join(", ")}` : " No active resources"}</small></span><button disabled={agent.current} onClick={() => void disconnectAgent(agent)}>Disconnect</button></div>) : <span>No connected agents.</span>}</div></fieldset>
     <fieldset><legend>Host IP for VMware / QEMU</legend><div className="ip-list">{addresses.length ? addresses.map((address) => <label key={`${address.name}-${address.address}`} className="radio"><input type="radio" checked={selectedAddress === address.address} onChange={() => setSelectedAddress(address.address)} /> <b>{address.address}</b> — {address.name}{address.virtual ? " (virtual adapter)" : ""}</label>) : <span>No active IPv4 address found.</span>}</div><div className="ini">host={selectedAddress || "<select an address>"}{"\n"}port={settings.port}</div></fieldset>
     <fieldset><legend>Message</legend><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Message for Windows 98" /><button disabled={!guestOnline} onClick={() => void sendMessage()}>Show message</button></fieldset>
     <fieldset><legend>Remote terminal</legend><div className="row"><input value={command} onChange={(e) => setCommand(e.target.value)} aria-label="Command" /><button disabled={!guestOnline || !!shellId} onClick={() => void runCommand()}>Run</button><button disabled={!shellId} onClick={() => void stopCommand()}>Terminate</button></div><pre>{terminal || "Output will stream here."}</pre></fieldset>

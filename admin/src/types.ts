@@ -1,7 +1,7 @@
 export interface BrokerStatus {
-  broker: { pipePath: string; guestPort: number };
+  broker: { pipePath: string; guestPort: number; lockingEnabled?: boolean };
   connection: { state: "online" | "offline" | string; connectedAt?: string; remoteAddress?: string; guestBuildId?: string };
-  lease?: { held: boolean; expiresAt?: string };
+  lease?: { held: boolean; expiresAt?: string; lockingEnabled?: boolean };
 }
 
 export interface BrokerReply<T = unknown> {

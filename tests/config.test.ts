@@ -28,6 +28,18 @@ describe("broker configuration", () => {
     const config = await loadBrokerConfig({ cwd: root, env: { LOCALAPPDATA: root } });
     expect(config.guestPort).toBe(9898);
     expect(config.pipePath).toBe(defaultPipePath());
+    expect(config.lockingEnabled).toBe(true);
+  });
+
+  it("accepts an explicit advisory parallel-mode setting", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-config-"));
+    roots.push(root);
+    const config = await loadBrokerConfig({
+      cwd: root,
+      env: { LOCALAPPDATA: root },
+      overrides: { lockingEnabled: false }
+    });
+    expect(config.lockingEnabled).toBe(false);
   });
 
   it("isolates non-default brokers by port while preserving the default shared pipe", async () => {

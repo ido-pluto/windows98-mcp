@@ -7,6 +7,7 @@ export const CLI_COMMANDS = [
   "simulator",
   "smoke-test",
   "diagnostics",
+  "client-transfer",
   "help",
   "version"
 ] as const;
@@ -21,6 +22,7 @@ export interface ParsedCliOptions {
   overrides: BrokerConfigFile;
   brokerHost?: string;
   brokerPort?: number;
+  transferRequest?: string;
 }
 
 const COMMANDS = new Set<string>(CLI_COMMANDS);
@@ -33,6 +35,7 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
   const overrides: BrokerConfigFile = {};
   let brokerHost: string | undefined;
   let brokerPort: number | undefined;
+  let transferRequest: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -107,6 +110,10 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       configArgs.push("--upstream", value);
       continue;
     }
+    if (option.name === "--transfer-request") {
+      transferRequest = option.value ?? requireValue(argv, ++index, option.name);
+      continue;
+    }
 
     if (!command && COMMANDS.has(token)) {
       command = token as CliCommand;
@@ -129,6 +136,7 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     overrides
     , ...(brokerHost ? { brokerHost } : {})
     , ...(brokerPort !== undefined ? { brokerPort } : {})
+    , ...(transferRequest ? { transferRequest } : {})
   };
 }
 

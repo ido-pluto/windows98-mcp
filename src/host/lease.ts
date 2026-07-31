@@ -226,17 +226,20 @@ export class LeaseManager extends EventEmitter {
     return index < 0 ? undefined : index + 1;
   }
 
+  /** Remove queued lease requests when the broker switches to advisory mode. */
+  clearWaiters(): void {
+    for (const waiter of this.waiters.splice(0)) {
+      clearTimeout(waiter.ticketTimer);
+      if (waiter.waitTimer) clearTimeout(waiter.waitTimer);
+      waiter.resolve?.({ acquired: false });
+    }
+  }
+
   close(): void {
     if (this.expirationTimer) {
       clearTimeout(this.expirationTimer);
     }
-    for (const waiter of this.waiters.splice(0)) {
-      clearTimeout(waiter.ticketTimer);
-      if (waiter.waitTimer) {
-        clearTimeout(waiter.waitTimer);
-      }
-      waiter.resolve?.({ acquired: false });
-    }
+    this.clearWaiters();
   }
 
   private assignOwner(sessionId: string, label: string): void {

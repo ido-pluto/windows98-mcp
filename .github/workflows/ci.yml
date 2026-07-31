@@ -54,8 +54,12 @@ jobs:
           Copy-Item guest/dist/WIN98CTL.EXE,guest/WIN98CTL.INI -Destination $probe
           Push-Location $probe
           try {
-            & .\WIN98CTL.EXE --self-test
-            if ($LASTEXITCODE -ne 0) { throw "WIN98CTL self-test failed with exit code $LASTEXITCODE" }
+            # WIN98CTL is a GUI-subsystem executable. PowerShell does not
+            # reliably populate $LASTEXITCODE when invoking it with `&`, even
+            # when it exits successfully. Start-Process exposes its actual
+            # process exit code on every Windows runner image.
+            $selfTest = Start-Process -FilePath .\WIN98CTL.EXE -ArgumentList '--self-test' -WorkingDirectory $probe -PassThru -Wait
+            if ($selfTest.ExitCode -ne 0) { throw "WIN98CTL self-test failed with exit code $($selfTest.ExitCode)" }
             Get-Content SELFTEST.TXT
             Select-String -Path SELFTEST.TXT -Pattern 'Target compatibility: PASS', 'Result: PASS' | Out-Host
           } finally { Pop-Location }
