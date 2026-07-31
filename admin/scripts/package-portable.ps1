@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$Version = "0.1.0",
+  [ValidateSet("x64", "arm64")][string]$Architecture = "x64",
   [string]$SidecarPath
 )
 
@@ -19,7 +20,7 @@ try { npm run tauri:build -- --no-bundle } finally { Pop-Location }
 
 if (-not (Test-Path -LiteralPath $releaseExe -PathType Leaf)) { throw "Tauri build did not produce: $releaseExe" }
 
-$portableName = "windows98-mcp-admin-$Version-windows-x64"
+$portableName = "windows98-mcp-admin-$Version-windows-$Architecture"
 $outputRoot = Join-Path $adminRoot "out"
 $portableRoot = Join-Path $outputRoot $portableName
 $zipPath = Join-Path $outputRoot "$portableName.zip"
@@ -30,5 +31,9 @@ Copy-Item -LiteralPath $releaseExe -Destination "$portableRoot\Windows 98 MCP Ad
 Copy-Item -LiteralPath $SidecarPath -Destination "$portableRoot\broker-sidecar\windows98-mcp-broker.exe"
 Copy-Item -LiteralPath "$adminRoot\README.md" -Destination "$portableRoot\README.TXT"
 Compress-Archive -LiteralPath $portableRoot -DestinationPath $zipPath
-Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath | ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path -Leaf $zipPath)" | Set-Content -Encoding ascii -NoNewline "$zipPath.sha256" }
+$sha = [Security.Cryptography.SHA256]::Create()
+$stream = [IO.File]::OpenRead($zipPath)
+try { $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant() }
+finally { $stream.Dispose(); $sha.Dispose() }
+[IO.File]::WriteAllText("$zipPath.sha256", "$digest  $(Split-Path -Leaf $zipPath)", [Text.Encoding]::ASCII)
 Write-Output "Portable bundle: $zipPath"

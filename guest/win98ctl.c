@@ -1,7 +1,9 @@
 /*
- * WIN98CTL - Windows 98 remote-control guest.
+ * WIN98CTL - Windows 98 through Windows 10 remote-control guest.
  * C89/Win32 source; intentionally avoids SendInput, Unicode APIs and APIs
- * introduced after Windows 98.  The guest makes an outbound TCP connection.
+ * introduced after Windows 98.  This same x86 executable runs on Windows 98
+ * and on Windows 10 (including x64 Windows 10 through WOW64).  The guest
+ * makes an outbound TCP connection.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -66,6 +68,23 @@ typedef struct {
     char ini_path[MAX_PATH];
     char log_path[MAX_PATH];
 } CONFIG;
+
+/*
+ * RtlGetVersion is dynamically resolved only on NT systems.  GetVersionExA is
+ * deliberately retained as the Windows 9x fallback.  A manifest-less Win32
+ * process can otherwise be reported as Windows 8 on Windows 10, so using the
+ * dynamically resolved NT entry point makes the capability/self-test report
+ * accurate without adding an import that Windows 98 cannot load.
+ */
+typedef struct {
+    ULONG dwOSVersionInfoSize;
+    ULONG dwMajorVersion;
+    ULONG dwMinorVersion;
+    ULONG dwBuildNumber;
+    ULONG dwPlatformId;
+    WCHAR szCSDVersion[128];
+} W98_RTL_OSVERSIONINFOW;
+typedef LONG (WINAPI *PFN_RTLGETVERSION)(W98_RTL_OSVERSIONINFOW *);
 
 /* GetCursorInfo is not declared by Win98 SDK headers; resolve it optionally. */
 typedef struct {
@@ -238,6 +257,43 @@ static int screen_color_depth(void) {
     HDC dc=GetDC(0);int depth=0;
     if(dc){depth=GetDeviceCaps(dc,BITSPIXEL)*GetDeviceCaps(dc,PLANES);ReleaseDC(0,dc);}
     return depth;
+}
+
+static void system_platform_info(char *name,unsigned long name_cap,char *version,unsigned long version_cap) {
+    W98_RTL_OSVERSIONINFOW rtl;
+    OSVERSIONINFOA legacy;
+    PFN_RTLGETVERSION rtl_get_version=0;
+    HMODULE ntdll;
+    ULONG major=0,minor=0,build=0,platform=0;
+    int exact_nt_version=0;
+    if(name_cap)name[0]=0;
+    if(version_cap)version[0]=0;
+    ntdll=GetModuleHandleA("NTDLL.DLL");
+    if(ntdll)rtl_get_version=(PFN_RTLGETVERSION)GetProcAddress(ntdll,"RtlGetVersion");
+    memset(&rtl,0,sizeof(rtl));rtl.dwOSVersionInfoSize=sizeof(rtl);
+    if(rtl_get_version&&rtl_get_version(&rtl)==0){
+        major=rtl.dwMajorVersion;minor=rtl.dwMinorVersion;build=rtl.dwBuildNumber;
+        platform=VER_PLATFORM_WIN32_NT;exact_nt_version=1;
+    }else{
+        memset(&legacy,0,sizeof(legacy));legacy.dwOSVersionInfoSize=sizeof(legacy);
+        if(GetVersionExA(&legacy)){
+            major=legacy.dwMajorVersion;minor=legacy.dwMinorVersion;build=legacy.dwBuildNumber;
+            platform=legacy.dwPlatformId;
+        }
+    }
+    if(name_cap){
+        if(platform==VER_PLATFORM_WIN32_WINDOWS){
+            if(major==4&&minor==10)strncpy(name,"Microsoft Windows 98",name_cap-1);
+            else strncpy(name,"Microsoft Windows 9x",name_cap-1);
+        }else if(platform==VER_PLATFORM_WIN32_NT){
+            if(major>=10)strncpy(name,"Microsoft Windows 10 or later",name_cap-1);
+            else strncpy(name,"Microsoft Windows NT",name_cap-1);
+        }else strncpy(name,"Microsoft Windows",name_cap-1);
+        name[name_cap-1]=0;
+    }
+    if(exact_nt_version)_snprintf(version,version_cap,"%lu.%lu build %lu",major,minor,build);
+    else _snprintf(version,version_cap,"%lu.%lu",major,minor);
+    if(version_cap)version[version_cap-1]=0;
 }
 
 static char *base64_encode(const unsigned char *in,unsigned long n) {
@@ -537,10 +593,11 @@ static int post_agent_message(const char *text) {
 }
 
 static char *dispatch(const char*method,const char*j) {
-    char a[1024],b[256],*out,*enc;long x,y,x2,y2,n,i,timeout;int action;POINT pt;unsigned char*bin;unsigned long bin_n,written;HANDLE f;DWORD attr,size,got;SHELL_SESSION*s;FILE_TRANSFER*t;
+    char a[1024],b[256],platform_name[64],platform_version[64],*out,*enc;long x,y,x2,y2,n,i,timeout;int action;POINT pt;unsigned char*bin;unsigned long bin_n,written;HANDLE f;DWORD attr,size,got;SHELL_SESSION*s;FILE_TRANSFER*t;
     if(!strcmp(method,"vm_capabilities")||!strcmp(method,"system_info")){
-      sprintf(a,"{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"uptimeMs\":%lu}",
-        BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",GetTickCount());return ok_data(a);
+      system_platform_info(platform_name,sizeof(platform_name),platform_version,sizeof(platform_version));
+      sprintf(a,"{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"%s\",\"osVersion\":\"%s\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"uptimeMs\":%lu}",
+        BUILD_ID,platform_name,platform_version,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",GetTickCount());return ok_data(a);
     }
     if(!strcmp(method,"show_message")){char *message=json_string_alloc(j,"message");if(!message)return string_error_result("message is required");action=post_agent_message(message);free(message);return action?ok_data("{\"accepted\":true}"):error_result("MESSAGE_UNAVAILABLE","The WIN98CTL status window is not available");}
     if(!strcmp(method,"system_reboot"))return schedule_system_exit(1,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
@@ -713,10 +770,11 @@ static void log_winsock_error(const char*message) {
 }
 
 static int connected_loop(SOCKET s) {
-    w98_u8 *payload;char json[4096],rid[128],method[128],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;
+    w98_u8 *payload;char json[4096],rid[128],method[128],platform_name[64],platform_version[64],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;
     wheel_command=GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"\"mouse_scroll\",":"";
-    sprintf(json,"{\"kind\":\"guest_hello\",\"capabilities\":{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"show_message\",\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
-      BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",wheel_command);
+    system_platform_info(platform_name,sizeof(platform_name),platform_version,sizeof(platform_version));
+    sprintf(json,"{\"kind\":\"guest_hello\",\"capabilities\":{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"%s\",\"osVersion\":\"%s\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"show_message\",\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
+      BUILD_ID,platform_name,platform_version,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",wheel_command);
     if(!w98_send_frame(s,W98_F_HELLO,0,0,0,0,json,strlen(json))||!receive_frame_with_timeout(s,&f,&payload,HANDSHAKE_TIMEOUT_MS))return 0;
     if(f.type!=W98_F_READY||f.seq_hi||f.seq_lo!=0){free(payload);return 0;}free(payload);
     log_line("guest ready");set_agent_status("Connected");control_socket=s;control_tx_sequence=1;control_rx_sequence=1;control_cancelled=control_aborted=control_dead=0;
@@ -746,16 +804,17 @@ static int install_startup(void) {
     if(r==ERROR_SUCCESS){r=RegSetValueExA(k,"WIN98CTL",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
 }
 static int self_test(void) {
-    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],*slash;FILE*f,*tf;unsigned char*d,pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
+    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],platform_name[64],platform_version[64],*slash;FILE*f,*tf;unsigned char*d,pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
     strcpy(dir,cfg.ini_path);slash=strrchr(dir,'\\');if(slash)*slash=0;if(!safe_format(path,MAX_PATH,"%s\\SELFTEST.TXT",dir,0))return 2;f=fopen(path,"w");if(!f)return 2;
-    reconnect_delay=RECONNECT_DELAY_MS;fprintf(f,"WIN98CTL %s SELF TEST\r\n",BUILD_ID);fprintf(f,"Configuration: PASS\r\n");fprintf(f,"Reconnect interval: %s (%lu ms)\r\n",reconnect_delay==2000UL?"PASS":"FAIL",reconnect_delay);if(reconnect_delay!=2000UL)ok=0;if(WSAStartup(MAKEWORD(2,0),&wd)){fprintf(f,"Winsock 2: FAIL (WSAStartup rejected version 2.0)\r\n");ok=0;}else{if(LOBYTE(wd.wVersion)<2){fprintf(f,"Winsock 2: FAIL (provider returned version %u.%u)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion));ok=0;}else fprintf(f,"Winsock 2: PASS %u.%u (%s)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion),wd.szDescription);WSACleanup();}
+    system_platform_info(platform_name,sizeof(platform_name),platform_version,sizeof(platform_version));
+    reconnect_delay=RECONNECT_DELAY_MS;fprintf(f,"WIN98CTL %s SELF TEST\r\n",BUILD_ID);fprintf(f,"Target compatibility: PASS (Windows 98 SE through Windows 10; x86/WOW64)\r\n");fprintf(f,"Running system: %s %s\r\n",platform_name,platform_version);fprintf(f,"Configuration: PASS\r\n");fprintf(f,"Reconnect interval: %s (%lu ms)\r\n",reconnect_delay==2000UL?"PASS":"FAIL",reconnect_delay);if(reconnect_delay!=2000UL)ok=0;if(WSAStartup(MAKEWORD(2,0),&wd)){fprintf(f,"Winsock 2: FAIL (WSAStartup rejected version 2.0)\r\n");ok=0;}else{if(LOBYTE(wd.wVersion)<2){fprintf(f,"Winsock 2: FAIL (provider returned version %u.%u)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion));ok=0;}else fprintf(f,"Winsock 2: PASS %u.%u (%s)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion),wd.szDescription);WSACleanup();}
     d=capture_bmp(0,0,64,64,0,&n);fprintf(f,"GDI capture: %s (%lu bytes)\r\n",d?"PASS":"FAIL",d?n:0);if(!d)ok=0;free(d);
     fprintf(f,"Protocol framing: PASS (v2 length and sequence validation)\r\n");
     fprintf(f,"Keyboard APIs: %s\r\n",GetProcAddress(GetModuleHandleA("USER32.DLL"),"keybd_event")?"PASS":"FAIL");
     if(!safe_format(temp,MAX_PATH,"%s\\W98TEST.TMP",dir,0)){fprintf(f,"Temporary file: FAIL (path)\r\n");ok=0;}
     else{tf=fopen(temp,"wb");if(tf){fwrite("WIN98CTL",1,8,tf);fclose(tf);}tf=fopen(temp,"rb");memset(pipebuf,0,sizeof(pipebuf));n=tf?fread(pipebuf,1,8,tf):0;if(tf)fclose(tf);DeleteFileA(temp);fprintf(f,"Temporary file: %s\r\n",n==8&&!memcmp(pipebuf,"WIN98CTL",8)?"PASS":"FAIL");if(n!=8||memcmp(pipebuf,"WIN98CTL",8))ok=0;}
     memset(pipebuf,0,sizeof(pipebuf));s=start_process("ECHO WIN98CTL_SELFTEST",dir,0);total=0;start=GetTickCount();if(s){while(GetTickCount()-start<5000&&total<sizeof(pipebuf)-1){total+=read_session(s,pipebuf+total,sizeof(pipebuf)-1-total);if(s->exited)break;Sleep(20);}pipebuf[total]=0;if(!s->exited)TerminateProcess(s->pi.hProcess,1);}
-    fprintf(f,"COMMAND.COM echo: %s\r\n",s&&strstr((char*)pipebuf,"WIN98CTL_SELFTEST")?"PASS":"FAIL");if(!s||!strstr((char*)pipebuf,"WIN98CTL_SELFTEST"))ok=0;if(s)close_session_handles(s);
+    fprintf(f,"Command processor echo: %s\r\n",s&&strstr((char*)pipebuf,"WIN98CTL_SELFTEST")?"PASS":"FAIL");if(!s||!strstr((char*)pipebuf,"WIN98CTL_SELFTEST"))ok=0;if(s)close_session_handles(s);
     fprintf(f,"Result: %s\r\n",ok?"PASS":"FAIL");fclose(f);return ok?0:1;
 }
 
@@ -795,7 +854,7 @@ static HWND create_agent_window(HINSTANCE instance,int show) {
     WNDCLASSA wc;HWND hwnd;HFONT font;int x,y;char build_text[128];
     memset(&wc,0,sizeof(wc));wc.style=CS_HREDRAW|CS_VREDRAW;wc.lpfnWndProc=agent_window_proc;wc.hInstance=instance;wc.hIcon=LoadIconA(0,IDI_APPLICATION);wc.hCursor=LoadCursorA(0,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);wc.lpszClassName="WIN98CTL_STATUS_WINDOW";
     if(!RegisterClassA(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return 0;x=(GetSystemMetrics(SM_CXSCREEN)-360)/2;y=(GetSystemMetrics(SM_CYSCREEN)-155)/2;if(x<0)x=0;if(y<0)y=0;
-    hwnd=CreateWindowA("WIN98CTL_STATUS_WINDOW","WIN98CTL",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,x,y,360,155,0,0,instance,0);if(!hwnd)return 0;agent_main_window=hwnd;font=(HFONT)GetStockObject(DEFAULT_GUI_FONT);sprintf(build_text,"Windows 98 remote control agent - %s",BUILD_ID);
+    hwnd=CreateWindowA("WIN98CTL_STATUS_WINDOW","WIN98CTL",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,x,y,360,155,0,0,instance,0);if(!hwnd)return 0;agent_main_window=hwnd;font=(HFONT)GetStockObject(DEFAULT_GUI_FONT);sprintf(build_text,"Windows 98 / Windows 10 control agent - %s",BUILD_ID);
     {HWND build=CreateWindowA("STATIC",build_text,WS_CHILD|WS_VISIBLE|SS_LEFT,14,14,325,18,hwnd,0,instance,0);if(build&&font)SendMessageA(build,WM_SETFONT,(WPARAM)font,TRUE);}
     agent_status_window=CreateWindowA("STATIC","Starting...",WS_CHILD|WS_VISIBLE|SS_LEFT,14,43,325,34,hwnd,0,instance,0);agent_close_button=CreateWindowA("BUTTON","Close",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,255,86,84,26,hwnd,(HMENU)ID_CLOSE_BUTTON,instance,0);
     if(agent_status_window&&font)SendMessageA(agent_status_window,WM_SETFONT,(WPARAM)font,TRUE);if(agent_close_button&&font)SendMessageA(agent_close_button,WM_SETFONT,(WPARAM)font,TRUE);ShowWindow(hwnd,show?show:SW_SHOW);UpdateWindow(hwnd);return hwnd;

@@ -23,6 +23,7 @@ Copy-Item -LiteralPath (Join-Path $repo "guest\WIN98CTL.INI") -Destination (Join
 Copy-Item -LiteralPath (Join-Path $repo "guest\RUNTEST.BAT") -Destination (Join-Path $bundle "RUNTEST.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\INSTALL.BAT") -Destination (Join-Path $bundle "INSTALL.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\RELEASE.TXT") -Destination (Join-Path $bundle "README.TXT")
+Copy-Item -LiteralPath (Join-Path $repo "guest\COMPATIBILITY.TXT") -Destination (Join-Path $bundle "COMPATIBILITY.TXT")
 
 $checksums = Get-ChildItem -LiteralPath $bundle -File |
     Sort-Object Name |

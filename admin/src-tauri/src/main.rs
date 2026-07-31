@@ -3,19 +3,23 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs::{self, File, OpenOptions}, io::{BufRead, BufReader, Write}, path::{Path, PathBuf}, process::{Child, Command}, sync::Mutex, time::{Duration, Instant}};
+use std::{fs, io::{BufRead, BufReader, Write}, path::{Path, PathBuf}, process::{Child, Command}, sync::Mutex, time::{Duration, Instant}};
+#[cfg(windows)] use std::fs::{File, OpenOptions};
+#[cfg(unix)] use std::os::unix::net::UnixStream;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
-const PIPE_PATH: &str = r"\\.\pipe\win98-mcp";
 const DEFAULT_PORT: u16 = 9898;
+
+#[cfg(windows)] type LocalStream = File;
+#[cfg(unix)] type LocalStream = UnixStream;
 
 struct PipeClient {
     session_id: String,
-    writer: File,
-    reader: BufReader<File>,
+    writer: LocalStream,
+    reader: BufReader<LocalStream>,
 }
-struct AppState { child: Mutex<Option<Child>>, client: Mutex<Option<PipeClient>> }
+struct AppState { child: Mutex<Option<Child>>, client: Mutex<Option<PipeClient>>, active_port: Mutex<u16> }
 
 #[derive(Serialize, Deserialize)]
 struct Settings { port: u16 }
@@ -35,15 +39,25 @@ fn write_settings(port: u16) -> Result<(), String> { fs::write(settings_path()?,
 
 fn sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("WIN98_MCP_BROKER_SIDECAR") { return Ok(PathBuf::from(path)); }
-    let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join("broker-sidecar").join("windows98-mcp-broker.exe");
-    if resource.is_file() { Ok(resource) } else { Err("Broker sidecar missing. Set WIN98_MCP_BROKER_SIDECAR for development or install a release that includes resources\\broker-sidecar\\windows98-mcp-broker.exe.".into()) }
+    let resource = app.path().resource_dir().map_err(|e| e.to_string())?.join("broker-sidecar").join(sidecar_file_name());
+    if resource.is_file() { return Ok(resource); }
+    let beside_exe = std::env::current_exe().map_err(|e| e.to_string())?.parent().ok_or("Cannot determine admin executable directory")?.join("broker-sidecar").join(sidecar_file_name());
+    if beside_exe.is_file() { return Ok(beside_exe); }
+    Err(format!("Broker sidecar missing. Set WIN98_MCP_BROKER_SIDECAR for development or install a release that includes resources/broker-sidecar/{}.", sidecar_file_name()))
 }
-fn pipe_exists() -> bool { OpenOptions::new().read(true).write(true).open(PIPE_PATH).is_ok() }
+#[cfg(windows)] fn sidecar_file_name() -> &'static str { "windows98-mcp-broker.exe" }
+#[cfg(unix)] fn sidecar_file_name() -> &'static str { "windows98-mcp-broker" }
+#[cfg(windows)] fn pipe_path(port: u16) -> String { if port == DEFAULT_PORT { r"\\.\pipe\win98-mcp".into() } else { format!(r"\\.\pipe\win98-mcp-{port}") } }
+#[cfg(unix)] fn pipe_path(port: u16) -> String { if port == DEFAULT_PORT { "/tmp/win98-mcp.sock".into() } else { format!("/tmp/win98-mcp-{port}.sock") } }
+#[cfg(windows)] fn open_local_stream(port: u16) -> Result<LocalStream, String> { OpenOptions::new().read(true).write(true).open(pipe_path(port)).map_err(|e| format!("BROKER_NOT_RUNNING: {e}")) }
+#[cfg(unix)] fn open_local_stream(port: u16) -> Result<LocalStream, String> { UnixStream::connect(pipe_path(port)).map_err(|e| format!("BROKER_NOT_RUNNING: {e}")) }
+fn pipe_exists(port: u16) -> bool { open_local_stream(port).is_ok() }
 fn start_sidecar(app: &AppHandle, state: &AppState, port: u16) -> Result<(), String> {
-    if pipe_exists() { return Ok(()); }
+    if pipe_exists(port) { *state.active_port.lock().map_err(|_| "Broker port state lock failed")? = port; return Ok(()); }
     let executable = sidecar_path(app)?;
-    let child = Command::new(executable).args(["broker", "--port", &port.to_string(), "--pipe", PIPE_PATH]).spawn().map_err(|e| format!("Could not start broker sidecar: {e}"))?;
+    let child = Command::new(executable).args(["broker", "--port", &port.to_string()]).spawn().map_err(|e| format!("Could not start broker sidecar: {e}"))?;
     *state.child.lock().map_err(|_| "Broker process state lock failed")? = Some(child);
+    *state.active_port.lock().map_err(|_| "Broker port state lock failed")? = port;
     Ok(())
 }
 fn stop_sidecar(state: &AppState) -> Result<(), String> {
@@ -52,8 +66,8 @@ fn stop_sidecar(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-fn connect_pipe() -> Result<PipeClient, String> {
-    let mut writer = OpenOptions::new().read(true).write(true).open(PIPE_PATH).map_err(|e| format!("BROKER_NOT_RUNNING: {e}"))?;
+fn connect_pipe(port: u16) -> Result<PipeClient, String> {
+    let mut writer = open_local_stream(port)?;
     let session_id = Uuid::new_v4().to_string();
     let hello = json!({ "kind": "broker_hello", "sessionId": session_id, "sessionLabel": "Windows 98 MCP Admin" });
     writeln!(writer, "{}", hello).map_err(|_| "BROKER_HELLO_WRITE_FAILED")?;
@@ -72,8 +86,9 @@ fn connect_pipe() -> Result<PipeClient, String> {
     }
 }
 fn broker_call(state: &AppState, method: String, params: Value) -> Reply {
+    let port = match state.active_port.lock() { Ok(port) => *port, Err(_) => return Reply { ok: false, result: None, image: None, error: Some("BROKER_PORT_STATE_LOCK_FAILED".into()) } };
     let mut slot = match state.client.lock() { Ok(value) => value, Err(_) => return Reply { ok: false, result: None, image: None, error: Some("BROKER_PIPE_STATE_LOCK_FAILED".into()) } };
-    if slot.is_none() { match connect_pipe() { Ok(client) => *slot = Some(client), Err(error) => return Reply { ok: false, result: None, image: None, error: Some(error) } } }
+    if slot.is_none() { match connect_pipe(port) { Ok(client) => *slot = Some(client), Err(error) => return Reply { ok: false, result: None, image: None, error: Some(error) } } }
     let client = slot.as_mut().expect("pipe client just initialized");
     let id = Uuid::new_v4().to_string();
     let request = json!({ "kind": "broker_request", "id": id, "sessionId": client.session_id, "sessionLabel": "Windows 98 MCP Admin", "method": method, "params": params });
@@ -104,5 +119,5 @@ fn broker_call(state: &AppState, method: String, params: Value) -> Reply {
 #[tauri::command] fn save_base64_png(path: String, data_url: String) -> Result<(), String> { let encoded = data_url.split_once(',').map(|(_, value)| value).ok_or("Invalid PNG data URL")?; let bytes = STANDARD.decode(encoded).map_err(|e| e.to_string())?; fs::write(Path::new(&path), bytes).map_err(|e| e.to_string()) }
 
 fn main() {
-    tauri::Builder::default().manage(AppState { child: Mutex::new(None), client: Mutex::new(None) }).invoke_handler(tauri::generate_handler![get_port, save_port, start_broker, restart_broker, broker_request, wait_for_guest, save_base64_png]).run(tauri::generate_context!()).expect("error while running Windows 98 MCP Admin");
+    tauri::Builder::default().manage(AppState { child: Mutex::new(None), client: Mutex::new(None), active_port: Mutex::new(read_settings().port) }).invoke_handler(tauri::generate_handler![get_port, save_port, start_broker, restart_broker, broker_request, wait_for_guest, save_base64_png]).run(tauri::generate_context!()).expect("error while running Windows 98 MCP Admin");
 }

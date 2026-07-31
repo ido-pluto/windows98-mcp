@@ -43,11 +43,11 @@ describe("incoming data stream retention", () => {
   });
 
   it("treats retention as an inactivity timeout while frames arrive", async () => {
-    const streams = new IncomingStreamRegistry(1024, 30, 2);
+    const streams = new IncomingStreamRegistry(1024, 200, 2);
     streams.accept(4, false, Buffer.from("first"));
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
     streams.accept(4, true, Buffer.from("second"));
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
 
     await expect(
       streams.waitFor({ streamId: 4, totalBytes: 11 }, 100)

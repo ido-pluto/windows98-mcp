@@ -31,6 +31,22 @@
             "label": "Windows x64 admin app SHA-256"
           },
           {
+            "path": "out/release/windows98-mcp-admin-windows-arm64.zip",
+            "label": "Windows ARM64 admin app"
+          },
+          {
+            "path": "out/release/windows98-mcp-admin-windows-arm64.zip.sha256",
+            "label": "Windows ARM64 admin app SHA-256"
+          },
+          {
+            "path": "out/release/windows98-mcp-admin-macos-arm64.zip",
+            "label": "macOS Apple Silicon admin app"
+          },
+          {
+            "path": "out/release/windows98-mcp-admin-macos-arm64.zip.sha256",
+            "label": "macOS Apple Silicon admin app SHA-256"
+          },
+          {
             "path": "out/release/windows98-mcp-*.tgz",
             "label": "npm package tarball"
           }

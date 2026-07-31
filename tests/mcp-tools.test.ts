@@ -24,9 +24,16 @@ describe("MCP tool surface", () => {
           "keyboard_hotkey",
           "keyboard_keycode",
           "keyboard_release_all",
-          "input_batch"
+          "input_batch",
+          "show_message"
         ])
     );
+  });
+
+  it("validates the Windows 98 message popup request", () => {
+    const schema = requireTool("show_message").inputSchema;
+    expect(schema.safeParse({ message: "Connection test" }).success).toBe(true);
+    expect(schema.safeParse({ message: "" }).success).toBe(false);
   });
 
   it("front-loads lease cleanup instructions", () => {

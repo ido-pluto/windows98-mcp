@@ -39,7 +39,7 @@ function Get-Sha256Hex([string]$Path) {
     finally { $stream.Dispose(); $sha.Dispose() }
 }
 
-foreach ($name in @("RUNTEST.BAT", "INSTALL.BAT", "README.TXT")) {
+foreach ($name in @("RUNTEST.BAT", "INSTALL.BAT", "README.TXT", "COMPATIBILITY.TXT")) {
     Write-AsciiCrlf (Join-Path $repo "guest\$name") (Join-Path $stage $name)
 }
 

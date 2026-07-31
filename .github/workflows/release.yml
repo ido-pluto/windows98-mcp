@@ -14,8 +14,129 @@ permissions:
   id-token: write
 
 jobs:
-  release:
+  guest:
+    name: Windows 98 guest release asset
     runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install pinned Open Watcom 1.9
+        shell: powershell
+        run: ./scripts/bootstrap-openwatcom.ps1 -Install
+      - name: Build and audit WIN98CTL.EXE
+        shell: powershell
+        run: ./scripts/build-guest.ps1 -Clean
+      - name: Run the guest self-test on modern Windows
+        shell: powershell
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'win98ctl-modern-windows'
+          New-Item -ItemType Directory -Force -Path $probe | Out-Null
+          Copy-Item guest/dist/WIN98CTL.EXE,guest/WIN98CTL.INI -Destination $probe
+          Push-Location $probe
+          try {
+            & .\WIN98CTL.EXE --self-test
+            if ($LASTEXITCODE -ne 0) { throw "WIN98CTL self-test failed with exit code $LASTEXITCODE" }
+            Get-Content SELFTEST.TXT
+            Select-String -Path SELFTEST.TXT -Pattern 'Target compatibility: PASS', 'Result: PASS' | Out-Host
+          } finally { Pop-Location }
+      - name: Stage Windows 98 release asset
+        shell: powershell
+        run: ./scripts/stage-release.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows98-mcp-guest-release
+          path: |
+            out/release/windows98-mcp-guest.zip
+            out/release/windows98-mcp-guest.zip.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  admin:
+    name: Admin (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            label: Windows x64
+            platform: windows
+            artifact: windows98-mcp-admin-windows-x64
+          - runner: windows-11-arm
+            label: Windows ARM64
+            platform: windows
+            artifact: windows98-mcp-admin-windows-arm64
+          - runner: macos-14
+            label: macOS Apple Silicon
+            platform: macos
+            artifact: windows98-mcp-admin-macos-arm64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm ci --prefix admin
+      - run: npm run build
+      - name: Build portable Windows admin archive
+        if: matrix.platform == 'windows'
+        shell: powershell
+        env:
+          ADMIN_ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sidecar = 'admin/src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe'
+          node scripts/build-broker-sidecar.mjs $sidecar
+          npm --prefix admin run tauri:build -- --no-bundle
+          $stage = "out/release/$env:ADMIN_ARTIFACT"
+          Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$stage/broker-sidecar" | Out-Null
+          Copy-Item 'admin/src-tauri/target/release/windows98-mcp-admin.exe' "$stage/Windows 98 MCP Admin.exe"
+          Copy-Item $sidecar "$stage/broker-sidecar/windows98-mcp-broker.exe"
+          Copy-Item 'admin/README.md' "$stage/README.TXT"
+          Compress-Archive -LiteralPath $stage -DestinationPath "out/release/$env:ADMIN_ARTIFACT.zip" -Force
+          (Get-FileHash -Algorithm SHA256 "out/release/$env:ADMIN_ARTIFACT.zip").Hash.ToLowerInvariant() + "  $env:ADMIN_ARTIFACT.zip" | Set-Content -Encoding ascii -NoNewline "out/release/$env:ADMIN_ARTIFACT.zip.sha256"
+      - name: Build portable macOS admin archive
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          ADMIN_ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          node scripts/build-broker-sidecar.mjs admin/src-tauri/resources/broker-sidecar/windows98-mcp-broker
+          (cd admin && npx --no-install tauri build --bundles app)
+          app="$(find admin/src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app"
+          stage="out/release/$ADMIN_ARTIFACT"
+          rm -rf "$stage" "out/release/$ADMIN_ARTIFACT.zip"
+          mkdir -p "$stage"
+          cp -R "$app" "$stage/"
+          # Tauri copies declared resources beneath Contents/Resources/resources.
+          # The portable layout also provides the direct location used at runtime.
+          cp -R admin/src-tauri/resources/broker-sidecar "$stage"/*/Contents/Resources/broker-sidecar
+          cp admin/README.md "$stage/README.TXT"
+          ditto -c -k --sequesterRsrc --keepParent "$stage" "out/release/$ADMIN_ARTIFACT.zip"
+          hash="$(shasum -a 256 "out/release/$ADMIN_ARTIFACT.zip" | awk '{print $1}')"
+          printf '%s  %s\n' "$hash" "$ADMIN_ARTIFACT.zip" > "out/release/$ADMIN_ARTIFACT.zip.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}-release
+          path: |
+            out/release/${{ matrix.artifact }}.zip
+            out/release/${{ matrix.artifact }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish npm package and GitHub release
+    needs: [guest, admin]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -24,7 +145,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          package-manager-cache: false
+          cache: npm
       - name: Use an npm CLI with trusted publishing support
         run: npm install --global npm@^11.5.1
       - run: npm ci
@@ -32,21 +153,22 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm audit --audit-level=moderate
-      - name: Install pinned Open Watcom 1.9
-        shell: powershell
-        run: ./scripts/bootstrap-openwatcom.ps1 -Install
-      - name: Build and audit WIN98CTL.EXE
-        shell: powershell
-        run: ./scripts/build-guest.ps1 -Clean
-      - name: Stage Windows 98 release asset
-        shell: powershell
-        run: ./scripts/stage-release.ps1
-      - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci --prefix admin
-      - run: npm --prefix admin run build
-      - name: Stage portable Windows x64 admin release asset
-        shell: powershell
-        run: ./scripts/stage-admin-release.ps1
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows98-mcp-guest-release
+          path: out/release
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows98-mcp-admin-windows-x64-release
+          path: out/release
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows98-mcp-admin-windows-arm64-release
+          path: out/release
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows98-mcp-admin-macos-arm64-release
+          path: out/release
       - name: Publish npm package and GitHub release
         run: npm run release
         env:

@@ -4,22 +4,26 @@
 [![npm](https://img.shields.io/npm/v/windows98-mcp)](https://www.npmjs.com/package/windows98-mcp)
 [![license](https://img.shields.io/npm/l/windows98-mcp)](./LICENSE)
 
-Control a real Windows 98 VM through explicit Model Context Protocol (MCP)
+Control a real Windows 98 VM or Windows 10 machine through explicit Model Context Protocol (MCP)
 tools. Agents can capture screens, use exact mouse and keyboard input, run and
 stream commands, manage windows and processes, use the clipboard, and transfer
 files and directories without ordinary Computer Use.
 
 **[Download the Windows 98 guest](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip)** ·
-**[Download the Windows admin app](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-x64.zip)** ·
+**[Windows x64 admin](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-x64.zip)** ·
+**[Windows ARM64 admin](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-arm64.zip)** ·
+**[macOS Apple Silicon admin](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-macos-arm64.zip)** ·
 [All releases](https://github.com/ido-pluto/windows98-mcp/releases/latest) ·
 [npm package](https://www.npmjs.com/package/windows98-mcp)
 
 ## How it works
 
-`WIN98CTL.EXE` is a C89 Windows 98 guest agent. It opens and maintains an
+`WIN98CTL.EXE` is a C89 x86 guest agent that runs on Windows 98 SE through
+Windows 10 (x86 or WOW64). It opens and maintains an
 outbound TCP connection to a singleton broker on the host. MCP clients and the
-Windows admin app both use that same broker through one local named pipe, so
-the exclusive lease prevents control collisions.
+Windows admin app both use the same broker through a local endpoint selected by
+port, so the exclusive lease prevents control collisions. The default port
+uses the shared endpoint; other ports are isolated broker instances.
 
 The transport intentionally has **no authentication or authorization**. Keep
 it only on an isolated disposable VM network. The framing, sequence numbers,
@@ -31,7 +35,7 @@ do not provide security.
 1. Download and extract the guest ZIP on the host.
 2. Edit `WIN98CTL.INI` directly. Set `host` to the host-only adapter IPv4
    address visible from Windows 98 and choose a TCP `port` (default `9898`).
-3. Copy the complete folder to `C:\WIN98CTL` in Windows 98. Run `RUNTEST.BAT`,
+3. Copy the complete folder to `C:\WIN98CTL` on Windows 98 or Windows 10. Run `RUNTEST.BAT`,
    then start `WIN98CTL.EXE` and leave its small status window open.
 4. Download and run the Windows admin app. Set the same port in its connection
    panel. It starts the broker and shows guest status.
@@ -55,8 +59,8 @@ The verified development host-only setup uses host `192.168.60.1` and guest
 
 ## Windows admin app
 
-The portable Windows x64 Tauri app is a small operator/test console for the
-same broker used by MCP. It persists only the listener port and provides:
+The portable Windows x64/ARM64 and macOS Apple Silicon Tauri app is a small
+operator/test console for the same broker used by MCP. It provides:
 
 - Guest connection status and capabilities.
 - A Windows 98 message popup.
@@ -64,8 +68,12 @@ same broker used by MCP. It persists only the listener port and provides:
 - File and directory push/pull with progress.
 - Screenshot preview and native save.
 
-Changing its port restarts the local broker after active terminal and transfer
-work is closed. The guest INI must use the same port.
+Changing its port restarts that app's local broker after active terminal and
+transfer work is closed. The default port (`9898`) uses the shared MCP broker
+endpoint. Every non-default port gets its own local broker endpoint, so two
+admin windows can control two guests concurrently: assign each guest a distinct
+port in its INI, then set each admin window to its matching port. For headless
+MCP access to a non-default guest, use `npx windows98-mcp --port <port>`.
 
 ## CLI
 
@@ -84,7 +92,8 @@ diagnostics [dir]   Collect sanitized diagnostics
 ```
 
 The Tauri app normally owns the port setting. `--port` is available for
-headless use and must match `WIN98CTL.INI`.
+headless use and must match `WIN98CTL.INI`; it also selects the matching
+port-scoped local broker endpoint.
 
 ## MCP tools
 

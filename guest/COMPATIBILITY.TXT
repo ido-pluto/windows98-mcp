@@ -1,0 +1,19 @@
+WIN98CTL COMPATIBILITY
+======================
+
+WIN98CTL.EXE is a single 32-bit ANSI Win32 executable. It is built against the
+Windows 98 API baseline and runs unchanged on:
+
+  - Windows 98 Second Edition with Winsock 2 installed
+  - Windows 10 32-bit
+  - Windows 10 x64 through the built-in WOW64 x86 subsystem
+
+All standard WIN98CTL functions use APIs available in the Windows 98 baseline:
+screen capture, mouse and keyboard input, ANSI clipboard/window APIs, redirected
+command sessions, process control, and file transfer. The program reports the
+actual connected system in its capability response and SELFTEST.TXT.
+
+On Windows 10, control is limited by normal Windows desktop security boundaries:
+the agent must run in the target user's interactive session, and must be elevated
+to automate elevated applications. UAC secure-desktop, lock/sign-in screens, and
+exclusive graphics/full-screen DOS programs remain outside the supported desktop.

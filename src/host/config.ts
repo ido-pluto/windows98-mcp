@@ -20,7 +20,6 @@ export interface BrokerConfig {
 
 export interface BrokerConfigFile {
   guestPort?: number;
-  pipePath?: string;
   stateDir?: string;
   artifactDir?: string;
   logPath?: string;
@@ -45,11 +44,12 @@ interface RuntimeSettings {
 
 const DEFAULT_PORT = 9898;
 
-export function defaultPipePath(): string {
+export function defaultPipePath(port = DEFAULT_PORT): string {
+  const suffix = port === DEFAULT_PORT ? "" : `-${port}`;
   if (process.platform === "win32") {
-    return "\\\\.\\pipe\\win98-mcp";
+    return `\\\\.\\pipe\\win98-mcp${suffix}`;
   }
-  return resolve(tmpdir(), "win98-mcp.sock");
+  return resolve(tmpdir(), `win98-mcp${suffix}.sock`);
 }
 
 export async function loadBrokerConfig(
@@ -67,20 +67,24 @@ export async function loadBrokerConfig(
   const runtime = await loadRuntimeSettings(env, cwd);
 
   const merged: BrokerConfigFile = { ...file, ...options.overrides };
+  const guestPort = integer(
+    options.overrides?.guestPort ?? merged.guestPort ?? runtime.port ?? envNumber(env["WIN98_MCP_GUEST_PORT"]) ?? DEFAULT_PORT,
+    "guestPort",
+    1,
+    65535
+  );
+  const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");
   const stateDir = resolveConfiguredPath(
     merged.stateDir ?? env["WIN98_MCP_STATE_DIR"] ??
-      resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp"),
+      (guestPort === DEFAULT_PORT
+        ? defaultStateRoot
+        : resolve(defaultStateRoot, `port-${guestPort}`)),
     cwd
   );
   const config: BrokerConfig = {
     bindHost: "0.0.0.0",
-    guestPort: integer(
-      options.overrides?.guestPort ?? merged.guestPort ?? runtime.port ?? envNumber(env["WIN98_MCP_GUEST_PORT"]) ?? DEFAULT_PORT,
-      "guestPort",
-      1,
-      65535
-    ),
-    pipePath: merged.pipePath ?? env["WIN98_MCP_PIPE"] ?? defaultPipePath(),
+    guestPort,
+    pipePath: defaultPipePath(guestPort),
     stateDir,
     artifactDir: resolveConfiguredPath(
       merged.artifactDir ?? resolve(stateDir, "artifacts"),

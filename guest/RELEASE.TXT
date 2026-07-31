@@ -1,15 +1,17 @@
 WIN98CTL - RELEASE DOWNLOAD
 ===========================
 
-This is the Windows 98 guest component for windows98-mcp.
+This is the Windows 98 through Windows 10 guest component for windows98-mcp.
 
 1. Extract this folder and edit WIN98CTL.INI. Set host to the host-only adapter
-   address visible from Windows 98 and set port to the host listener port.
-2. Copy the complete folder to Windows 98.
+   address visible from the controlled Windows machine and set port to the host
+   listener port.
+2. Copy the complete folder to Windows 98 SE or Windows 10.
 3. Run RUNTEST.BAT, then WIN98CTL.EXE.
 4. On the host, start the Windows admin app or run npx windows98-mcp.
 5. Run INSTALL.BAT only after the host smoke test passes.
 
-The Windows 98 guest always connects outbound to the host. It retries every
-two seconds. Protocol v2 has no secrets, authentication, or encryption; use it
-only on an isolated VM network.
+The same 32-bit WIN98CTL.EXE runs on Windows 98 SE and Windows 10 (32-bit or
+x64 through WOW64). The guest always connects outbound to the host and retries
+every two seconds. Protocol v2 has no secrets, authentication, or encryption;
+use it only on an isolated VM network.

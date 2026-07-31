@@ -16,6 +16,7 @@ function App() {
   const [command, setCommand] = useState("ver");
   const [terminal, setTerminal] = useState("");
   const [shellId, setShellId] = useState<string>();
+  const [transferActive, setTransferActive] = useState(false);
   const [guestPath, setGuestPath] = useState("C:\\MCPTEST\\");
   const [hostPath, setHostPath] = useState("");
   const [shot, setShot] = useState<string>();
@@ -46,6 +47,7 @@ function App() {
   async function applyPort() {
     const nextPort = Number(port);
     if (!Number.isInteger(nextPort) || nextPort < 1 || nextPort > 65535) { setNotice("Port must be between 1 and 65535."); return; }
+    if (shellId || transferActive) { setNotice("Close the active terminal or transfer before changing ports."); return; }
     try { await invoke("save_port", { port: nextPort }); await invoke("restart_broker", { port: nextPort }); setNotice(`Listening on port ${nextPort}.`); await refresh(); }
     catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
   }
@@ -91,11 +93,12 @@ function App() {
   async function transfer(direction: "push" | "pull", directory = false) {
     if (!hostPath || !guestPath) { setNotice("Choose a host path and set a guest path first."); return; }
     const method = directory ? `directory_${direction}` : `file_${direction}`;
+    setTransferActive(true);
     try {
       await request(method, direction === "push" ? { host_path: hostPath, guest_path: guestPath, overwrite: false } : { guest_path: guestPath, host_path: hostPath, overwrite: false });
       setNotice(`${directory ? "Directory" : "File"} ${direction} completed.`);
     } catch (error) { setNotice(String(error)); }
-    finally { await releaseVm(); }
+    finally { setTransferActive(false); await releaseVm(); }
   }
 
   async function capture() {
@@ -116,7 +119,7 @@ function App() {
 
   return <main>
     <header><div><h1>Windows 98 MCP Admin</h1><p>{notice}</p></div><span className={guestOnline ? "pill online" : "pill"}>{connectionText}</span></header>
-    <section className="card connection"><h2>Connection</h2><label>Guest listener port <input type="number" min="1" max="65535" value={port} onChange={(e) => setPort(Number(e.target.value))} /></label><button onClick={() => void applyPort()}>Apply port</button><button className="secondary" onClick={() => void testConnection().then(setConnection).catch((e) => setNotice(String(e)))}>Wait / test (5s)</button><dl><dt>Pipe</dt><dd>{connection?.broker.pipePath ?? "—"}</dd><dt>Guest</dt><dd>{connection?.connection.remoteAddress ?? "not connected"}</dd><dt>Build</dt><dd>{connection?.connection.guestBuildId ?? "—"}</dd><dt>Connected</dt><dd>{connection?.connection.connectedAt ?? "—"}</dd></dl></section>
+    <section className="card connection"><h2>Connection</h2><label>Guest listener port <input type="number" min="1" max="65535" value={port} onChange={(e) => setPort(Number(e.target.value))} /></label><button disabled={!!shellId || transferActive} onClick={() => void applyPort()}>Apply port</button><button className="secondary" onClick={() => void testConnection().then(setConnection).catch((e) => setNotice(String(e)))}>Wait / test (5s)</button><dl><dt>Pipe</dt><dd>{connection?.broker.pipePath ?? "—"}</dd><dt>Guest</dt><dd>{connection?.connection.remoteAddress ?? "not connected"}</dd><dt>Build</dt><dd>{connection?.connection.guestBuildId ?? "—"}</dd><dt>Connected</dt><dd>{connection?.connection.connectedAt ?? "—"}</dd></dl></section>
     <section className="card"><h2>Message</h2><p>Displays a Windows 98 message box titled “Windows 98 Remote Control”.</p><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Message for Windows 98" /><button disabled={!guestOnline} onClick={() => void sendMessage()}>Show message</button></section>
     <section className="card"><h2>Remote terminal</h2><div className="row"><input value={command} onChange={(e) => setCommand(e.target.value)} aria-label="Command" /><button disabled={!guestOnline || !!shellId} onClick={() => void runCommand()}>Run</button><button className="danger" disabled={!shellId} onClick={() => void stopCommand()}>Terminate</button></div><pre>{terminal || "Output will stream here."}</pre></section>
     <section className="card"><h2>Files and directories</h2><div className="row"><input value={hostPath} onChange={(e) => setHostPath(e.target.value)} placeholder="Host file or directory" /><button className="secondary" onClick={() => void chooseHostPath(false)}>File…</button><button className="secondary" onClick={() => void chooseHostPath(true)}>Folder…</button></div><input value={guestPath} onChange={(e) => setGuestPath(e.target.value)} placeholder="Guest path" /><div className="row"><button disabled={!guestOnline} onClick={() => void transfer("push")}>Push file</button><button disabled={!guestOnline} onClick={() => void transfer("pull")}>Pull file</button><button disabled={!guestOnline} onClick={() => void transfer("push", true)}>Push directory</button><button disabled={!guestOnline} onClick={() => void transfer("pull", true)}>Pull directory</button></div></section>

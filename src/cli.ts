@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 import { parseCliArgs } from "./cli-options.js";
 import {
   brokerIsReachable,
@@ -15,6 +13,7 @@ import {
 } from "./host/index.js";
 import { startStdioMcp } from "./mcp/index.js";
 import { EXPECTED_GUEST_BUILD_ID } from "./shared/build-info.js";
+import { PACKAGE_VERSION } from "./shared/package-info.js";
 import { SimulatedGuest, writeSimulatorFixture } from "./simulator/index.js";
 import { collectDiagnostics } from "./workflows/diagnostics.js";
 import { runSmokeTest } from "./workflows/smoke-test.js";
@@ -46,7 +45,7 @@ async function main(): Promise<void> {
         await runDiagnostics();
         break;
       case "version":
-        process.stdout.write(`${await packageVersion()}\n`);
+        process.stdout.write(`${PACKAGE_VERSION}\n`);
         break;
       case "help":
         printHelp();
@@ -236,32 +235,4 @@ Examples:
   npx windows98-mcp
   npx windows98-mcp --port 9898
 `);
-}
-
-
-async function findPackageRoot(): Promise<string> {
-  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    path.resolve(moduleDirectory, ".."),
-    path.resolve(moduleDirectory, "../..")
-  ];
-  for (const candidate of candidates) {
-    try {
-      await Promise.all([
-        access(path.join(candidate, "package.json"))
-      ]);
-      return candidate;
-    } catch {
-      // Try the compiled and source layouts in turn.
-    }
-  }
-  throw new Error("PACKAGE_ROOT_NOT_FOUND");
-}
-
-async function packageVersion(): Promise<string> {
-  const root = await findPackageRoot();
-  const manifest = JSON.parse(
-    await readFile(path.join(root, "package.json"), "utf8")
-  ) as { version?: string };
-  return manifest.version ?? "unknown";
 }

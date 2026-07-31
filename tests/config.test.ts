@@ -30,6 +30,18 @@ describe("broker configuration", () => {
     expect(config.pipePath).toBe(defaultPipePath());
   });
 
+  it("isolates non-default brokers by port while preserving the default shared pipe", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-config-"));
+    roots.push(root);
+    const config = await loadBrokerConfig({
+      cwd: root,
+      overrides: { guestPort: 9999 }
+    });
+    expect(config.pipePath).toBe(defaultPipePath(9999));
+    expect(config.pipePath).not.toBe(defaultPipePath(9898));
+    expect(config.stateDir).toMatch(/port-9999$/u);
+  });
+
   it("allows only a valid port override", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-config-"));
     roots.push(root);
