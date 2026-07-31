@@ -107,7 +107,8 @@ const NON_LOCKING_METHODS = new Set([
   "vm_lock",
   "vm_wait",
   "vm_unlock",
-  "host_network_info"
+  "host_network_info",
+  "broker_set_upstream"
 ]);
 
 export class Broker {
@@ -468,6 +469,90 @@ export class Broker {
             ? { host: this.config.upstreamHost, port: this.config.upstreamPort }
             : undefined
         })
+      );
+    }
+    if (method === "broker_set_upstream") {
+      const enabled = params["enabled"] === true;
+      const host = typeof params["host"] === "string" ? params["host"].trim() : "";
+      const rawPort = params["port"];
+      const port = typeof rawPort === "number" ? rawPort : undefined;
+      if (enabled && (!host || !Number.isInteger(port) || port === undefined || port < 1 || port > 65_535)) {
+        return this.brokerResponse(
+          requestId,
+          this.result(sessionId, requestId, false, "INVALID_ARGUMENT", "A proxy host and port between 1 and 65535 are required.", false)
+        );
+      }
+      const unchanged = enabled
+        ? this.config.upstreamHost === host && this.config.upstreamPort === port
+        : this.config.upstreamHost === undefined;
+      if (unchanged) {
+        return this.brokerResponse(
+          requestId,
+          this.result(
+            sessionId,
+            requestId,
+            true,
+            "OK",
+            "The requested proxy configuration is already active.",
+            false,
+            undefined,
+            { upstream: enabled ? { host, port } : undefined, reconnecting: false }
+          )
+        );
+      }
+      if (this.lease.currentOwner) {
+        return this.brokerResponse(
+          requestId,
+          this.result(
+            sessionId,
+            requestId,
+            false,
+            "VM_BUSY",
+            "Close active VM work before changing the proxy destination.",
+            true,
+            "Call vm_unlock after closing terminals and transfers."
+          )
+        );
+      }
+      const previous = this.config.upstreamHost
+        ? { host: this.config.upstreamHost, port: this.config.upstreamPort }
+        : undefined;
+      if (enabled) {
+        this.config.upstreamHost = host;
+        this.config.upstreamPort = port!;
+      } else {
+        delete this.config.upstreamHost;
+        delete this.config.upstreamPort;
+      }
+      // The guest keeps a two-second reconnect loop. Closing its current
+      // channel is deliberate: its next connection is accepted using the
+      // newly selected direct or upstream transport.
+      const guest = this.guest;
+      const bridge = this.proxyBridge;
+      this.guest = undefined;
+      this.proxyBridge = undefined;
+      this.capabilities = undefined;
+      this.connectionState = { state: "offline", epoch: ++this.connectionEpoch };
+      guest?.destroy();
+      bridge?.destroy();
+      this.logger.write("info", "upstream_reconfigured", {
+        previous,
+        upstream: enabled ? { host, port } : undefined
+      });
+      return this.brokerResponse(
+        requestId,
+        this.result(
+          sessionId,
+          requestId,
+          true,
+          "OK",
+          enabled
+            ? "Proxy destination applied. The guest will reconnect through the remote broker."
+            : "Proxy disabled. The guest will reconnect directly to this broker.",
+          false,
+          undefined,
+          { upstream: enabled ? { host, port } : undefined, reconnecting: true }
+        )
       );
     }
     if (method === "vm_capabilities") {

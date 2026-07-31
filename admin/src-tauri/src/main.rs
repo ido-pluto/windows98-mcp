@@ -87,6 +87,22 @@ fn start_sidecar(app: &AppHandle, state: &AppState, settings: &Settings) -> Resu
     *state.active_port.lock().map_err(|_| "Broker port state lock failed")? = port;
     Ok(())
 }
+fn apply_proxy_settings(app: &AppHandle, state: &AppState, settings: &Settings) -> Result<(), String> {
+    validate_settings(settings)?;
+    let params = json!({
+        "enabled": settings.upstream_enabled,
+        "host": settings.upstream_host.trim(),
+        "port": settings.upstream_port
+    });
+    let mut last_error = String::from("BROKER_NOT_RUNNING");
+    for _ in 0..20 {
+        let reply = broker_call(app, state, "broker_set_upstream".into(), params.clone());
+        if reply.ok { return Ok(()); }
+        last_error = reply.error.unwrap_or_else(|| "BROKER_PROXY_CONFIGURATION_FAILED".into());
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(last_error)
+}
 fn stop_sidecar(state: &AppState) -> Result<(), String> {
     if let Some(mut child) = state.child.lock().map_err(|_| "Broker process state lock failed")?.take() {
         match child.kill() {
@@ -150,17 +166,21 @@ fn broker_call(app: &AppHandle, state: &AppState, method: String, params: Value)
 
 #[tauri::command] fn get_settings() -> Settings { read_settings() }
 #[tauri::command] fn save_settings(settings: Settings) -> Result<(), String> { validate_settings(&settings)?; write_settings(&settings) }
-#[tauri::command] fn start_broker(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> { start_sidecar(&app, &state, &settings) }
+#[tauri::command] fn start_broker(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
+    start_sidecar(&app, &state, &settings)?;
+    apply_proxy_settings(&app, &state, &settings)
+}
 #[tauri::command] fn restart_broker(app: AppHandle, state: State<AppState>, settings: Settings) -> Result<(), String> {
     validate_settings(&settings)?;
     let active_port = *state.active_port.lock().map_err(|_| "Broker port state lock failed")?;
     // A broker started by another MCP/admin process is already the correct
     // singleton for this port. Do not race its pipe by attempting to replace it.
     if active_port == settings.port && state.child.lock().map_err(|_| "Broker process state lock failed")?.is_none() && pipe_exists(settings.port) {
-        return Ok(());
+        return apply_proxy_settings(&app, &state, &settings);
     }
     stop_sidecar(&state)?;
-    start_sidecar(&app, &state, &settings)
+    start_sidecar(&app, &state, &settings)?;
+    apply_proxy_settings(&app, &state, &settings)
 }
 #[tauri::command] async fn broker_request(app: AppHandle, method: String, params: Value) -> Reply {
     let worker = app.clone();
