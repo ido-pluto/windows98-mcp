@@ -8,7 +8,6 @@ import { parseCliArgs } from "./cli-options.js";
 import {
   brokerIsReachable,
   connectBroker,
-  deriveLocalAdapterToken,
   loadBrokerConfig,
   startBroker,
   type Broker,
@@ -18,49 +17,49 @@ import { startStdioMcp } from "./mcp/index.js";
 import { EXPECTED_GUEST_BUILD_ID } from "./shared/build-info.js";
 import { SimulatedGuest, writeSimulatorFixture } from "./simulator/index.js";
 import { collectDiagnostics } from "./workflows/diagnostics.js";
-import { configureInstallation } from "./workflows/configure.js";
 import { runSmokeTest } from "./workflows/smoke-test.js";
 
 const cli = parseCliArgs(process.argv.slice(2));
 const command = cli.command;
 
-try {
-  switch (command) {
-    case "broker":
-      await runBroker();
-      break;
-    case "stdio":
-      await runStdio();
-      break;
-    case "configure":
-      await runConfigure();
-      break;
-    case "doctor":
-      await runDoctor();
-      break;
-    case "simulator":
-      await runSimulator();
-      break;
-    case "smoke-test":
-      await runSmoke();
-      break;
-    case "diagnostics":
-      await runDiagnostics();
-      break;
-    case "version":
-      process.stdout.write(`${await packageVersion()}\n`);
-      break;
-    case "help":
-      printHelp();
-      break;
-    default:
-      throw new Error(`UNKNOWN_COMMAND:${command}`);
+void main();
+
+async function main(): Promise<void> {
+  try {
+    switch (command) {
+      case "broker":
+        await runBroker();
+        break;
+      case "stdio":
+        await runStdio();
+        break;
+      case "doctor":
+        await runDoctor();
+        break;
+      case "simulator":
+        await runSimulator();
+        break;
+      case "smoke-test":
+        await runSmoke();
+        break;
+      case "diagnostics":
+        await runDiagnostics();
+        break;
+      case "version":
+        process.stdout.write(`${await packageVersion()}\n`);
+        break;
+      case "help":
+        printHelp();
+        break;
+      default:
+        throw new Error(`UNKNOWN_COMMAND:${command}`);
+    }
+  } catch (error) {
+    process.stderr.write(
+      `[win98-mcp] ${error instanceof Error ? error.message : String(error)}\n`
+    );
+    process.exitCode = 1;
   }
-} catch (error) {
-  process.stderr.write(
-    `[win98-mcp] ${error instanceof Error ? error.message : String(error)}\n`
-  );
-  process.exitCode = 1;
 }
 
 async function runBroker(): Promise<void> {
@@ -85,7 +84,6 @@ async function runStdio(): Promise<void> {
   }
   await startStdioMcp({
     pipePath: config.pipePath,
-    localToken: deriveLocalAdapterToken(config.psk),
     requestTimeoutMs: 11 * 60 * 1000
   });
 }
@@ -95,7 +93,6 @@ async function runDoctor(): Promise<void> {
   await ensureBroker(config);
   const client = await connectBroker({
     pipePath: config.pipePath,
-    localToken: deriveLocalAdapterToken(config.psk),
     sessionLabel: `doctor:${process.pid}`,
     requestTimeoutMs: 10_000
   });
@@ -114,7 +111,7 @@ async function runDoctor(): Promise<void> {
       capabilities: capabilities.result,
       copyRequired:
         status.result.connection.state !== "online"
-          ? "WIN98CTL.INI (verify host/port/PSK first)"
+          ? "WIN98CTL.INI (verify host and port first)"
           : status.result.connection.guestBuildId !== EXPECTED_GUEST_BUILD_ID &&
               status.result.connection.guestBuildId !== "simulator-1"
             ? "WIN98CTL.EXE and package"
@@ -131,39 +128,17 @@ async function runDoctor(): Promise<void> {
   }
 }
 
-async function runConfigure(): Promise<void> {
-  const guestDirectory = configureGuestDirectory(cli.commandArgs);
-  const result = await configureInstallation({
-    workspaceRoot: process.cwd(),
-    guestDirectory,
-    ...(cli.configPath ? { configPath: cli.configPath } : {}),
-    ...(cli.overrides.bindHost ? { bindHost: cli.overrides.bindHost } : {}),
-    ...(cli.overrides.expectedGuestIp
-      ? { expectedGuestIp: cli.overrides.expectedGuestIp }
-      : {}),
-    ...(cli.overrides.guestPort
-      ? { guestPort: cli.overrides.guestPort }
-      : {}),
-    ...(cli.overrides.stateDir ? { stateDir: cli.overrides.stateDir } : {}),
-    ...(cli.overrides.hostAllowedRoots
-      ? { hostAllowedRoots: cli.overrides.hostAllowedRoots }
-      : {})
-  });
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-}
-
 async function runSimulator(): Promise<void> {
   const config = await loadCliConfig();
   await ensureBroker(config);
   const rootDirectory = path.join(config.stateDir, "simulator-root");
   await writeSimulatorFixture(rootDirectory);
   const simulator = new SimulatedGuest({
-    host: config.bindHost,
+    host: "127.0.0.1",
     port: config.guestPort,
-    psk: config.psk,
     rootDirectory
   });
-  simulator.on("authenticated", () => {
+  simulator.on("connected", () => {
     process.stderr.write("[win98-mcp] simulated Windows 98 guest connected\n");
   });
   simulator.on("protocolError", (error) => {
@@ -215,18 +190,8 @@ async function ensureBroker(config: BrokerConfig): Promise<void> {
 }
 
 async function loadCliConfig(): Promise<BrokerConfig> {
-  let configPath = cli.configPath ?? process.env["WIN98_MCP_CONFIG"];
-  if (!configPath) {
-    const projectConfig = path.resolve(".win98-mcp", "config.json");
-    try {
-      await access(projectConfig);
-      configPath = projectConfig;
-    } catch {
-      // Environment-only configuration remains supported.
-    }
-  }
   return await loadBrokerConfig({
-    ...(configPath ? { configPath } : {}),
+    ...(cli.configPath ? { configPath: cli.configPath } : {}),
     overrides: cli.overrides
   });
 }
@@ -257,46 +222,22 @@ With no command, the stdio MCP adapter starts for npx-based MCP clients.
 
   broker              Run the long-lived host broker
   stdio               Run the Codex stdio MCP adapter
-  configure           Write matching host and downloaded-guest configuration
   doctor              Check broker, guest, and negotiated capabilities
   simulator           Run the deterministic simulated Windows 98 guest
   smoke-test          Exercise the connected guest safely
   diagnostics [dir]   Collect sanitized diagnostics
 
 Network and configuration options:
-  --ip <guest-ip>     Only accept the Windows 98 guest at this IPv4 address
-  --bind <host-ip>    Listen on this host-only adapter address
   --port <port>       Guest listener port (default: 9898)
   --config <file>     Load a broker JSON configuration file
   --state-dir <dir>   Store logs and artifacts in this directory
-  --host-root <dir>   Allow file transfers beneath this host root (repeatable)
 
 Examples:
-  npx windows98-mcp --ip 192.168.60.128
-  npx windows98-mcp configure --bind 192.168.60.1 --ip 192.168.60.128 --guest-dir C:\\WIN98CTL
-  npx windows98-mcp doctor --ip 192.168.60.128
+  npx windows98-mcp
+  npx windows98-mcp --port 9898
 `);
 }
 
-function configureGuestDirectory(args: string[]): string {
-  let guestDirectory: string | undefined;
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index];
-    if (token === "--guest-dir") {
-      const value = args[++index];
-      if (!value) throw new Error("CLI_VALUE_REQUIRED:--guest-dir");
-      guestDirectory = value;
-      continue;
-    }
-    if (token?.startsWith("--guest-dir=")) {
-      guestDirectory = token.slice("--guest-dir=".length);
-      continue;
-    }
-    throw new Error(`CLI_UNKNOWN_CONFIGURE_OPTION:${token}`);
-  }
-  if (!guestDirectory) throw new Error("CLI_VALUE_REQUIRED:--guest-dir");
-  return guestDirectory;
-}
 
 async function findPackageRoot(): Promise<string> {
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));

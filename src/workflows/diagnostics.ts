@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   connectBroker,
-  deriveLocalAdapterToken,
   publicConfig,
   type BrokerConfig
 } from "../host/index.js";
@@ -17,7 +16,6 @@ export async function collectDiagnostics(
   try {
     const client = await connectBroker({
       pipePath: config.pipePath,
-      localToken: deriveLocalAdapterToken(config.psk),
       sessionLabel: `diagnostics:${process.pid}`,
       requestTimeoutMs: 5_000
     });

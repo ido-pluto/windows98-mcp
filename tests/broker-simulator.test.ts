@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -14,7 +14,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   connectBroker,
-  deriveLocalAdapterToken,
   startBroker,
   type Broker,
   type BrokerConfig,
@@ -42,19 +41,15 @@ afterEach(async () => {
 });
 
 describe("broker with deterministic guest", () => {
-  it("rejects local adapters without the PSK-derived credential", async () => {
+  it("accepts local adapters without a credential on the fixed unauthenticated protocol", async () => {
     const harness = await createHarness();
-    await expect(
-      connectBroker({
-        pipePath: harness.config.pipePath,
-        localToken: "0".repeat(64),
-        sessionLabel: "unauthorized-adapter",
-        connectTimeoutMs: 1_000
-      })
-    ).rejects.toThrow(/BROKER_CONNECTION_CLOSED|BROKER_HELLO_TIMEOUT/u);
+    const client = await createClient(harness, "local-adapter");
+    await expect(client.call("vm_status")).resolves.toMatchObject({
+      result: { ok: true, code: "OK" }
+    });
   });
 
-  it("authenticates, captures a screen, and enforces exclusive ownership", async () => {
+  it("connects, captures a screen, and enforces exclusive ownership", async () => {
     const harness = await createHarness();
     const owner = await createClient(harness, "owner");
     const contender = await createClient(harness, "contender");
@@ -692,27 +687,23 @@ async function createHarness(): Promise<Harness> {
       ? `\\\\.\\pipe\\win98-mcp-test-${randomUUID()}`
       : path.join(root, "broker.sock");
   const config: BrokerConfig = {
-    bindHost: "127.0.0.1",
+    bindHost: "0.0.0.0",
     guestPort,
     pipePath,
-    psk: randomBytes(32),
     stateDir: root,
     artifactDir: path.join(root, "artifacts"),
     logPath: path.join(root, "broker.jsonl"),
     leaseTtlMs: 30 * 60 * 1000,
     waitTicketTtlMs: 10 * 60 * 1000,
     requestTimeoutMs: 10_000,
-    handshakeTimeoutMs: 5_000,
+    guestConnectTimeoutMs: 5_000,
     heartbeatTimeoutMs: 30_000,
     maxArtifactBytes: 8 * 1024 * 1024,
-    allowInsecurePublicBind: false,
-    hostAllowedRoots: [root]
   };
   const broker = await startBroker(config);
   const simulator = new SimulatedGuest({
     host: "127.0.0.1",
     port: guestPort,
-    psk: config.psk,
     rootDirectory: path.join(root, "guest")
   });
   const harness: Harness = { broker, simulator, config, root, clients: [] };
@@ -728,7 +719,6 @@ async function createClient(
 ): Promise<BrokerClient> {
   const client = await connectBroker({
     pipePath: harness.config.pipePath,
-    localToken: deriveLocalAdapterToken(harness.config.psk),
     sessionLabel: label,
     requestTimeoutMs: 10_000
   });

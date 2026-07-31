@@ -14,7 +14,6 @@ interface PendingCall {
 
 export interface BrokerClientOptions {
   pipePath: string;
-  localToken: string;
   sessionId?: string;
   sessionLabel?: string;
   connectTimeoutMs?: number;
@@ -84,7 +83,6 @@ export class BrokerClient {
       kind: "broker_hello",
       sessionId: this.sessionId,
       sessionLabel: this.sessionLabel,
-      localAuth: this.options.localToken
     };
     socket.write(`${JSON.stringify(hello)}\n`);
     await this.waitUntilReady(this.options.connectTimeoutMs ?? 5_000);

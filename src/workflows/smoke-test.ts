@@ -9,7 +9,6 @@ import {
 import path from "node:path";
 import {
   connectBroker,
-  deriveLocalAdapterToken,
   type BrokerClient,
   type BrokerConfig
 } from "../host/index.js";
@@ -42,10 +41,8 @@ export async function runSmokeTest(
 ): Promise<SmokeTestReport> {
   const startedAt = new Date().toISOString();
   const checks: SmokeTestCheck[] = [];
-  const localToken = deriveLocalAdapterToken(config.psk);
   const client = await connectBroker({
     pipePath: config.pipePath,
-    localToken,
     sessionLabel: `smoke-test:${process.pid}`,
     requestTimeoutMs: 31 * 60 * 1_000
   });
@@ -118,16 +115,16 @@ export async function runSmokeTest(
     guestBuildId = status?.result.connection.guestBuildId;
     if (status?.result.connection.state !== "online") {
       verify(
-        "Authenticated guest online",
+        "Windows 98 guest online",
         false,
         "VM_OFFLINE",
-        "No authenticated Windows 98 guest is online."
+        "No Windows 98 guest is online."
       );
       copy = {
         recopy: "ini",
         copyRequired: "WIN98CTL.INI",
         copyReason:
-          "The guest is offline. Recheck/recopy the INI host address and PSK before replacing the EXE."
+          "The guest is offline. Recheck/recopy the INI host address and port before replacing the EXE."
       };
     } else if (
       guestBuildId !== "simulator-1" &&
@@ -182,7 +179,7 @@ export async function runSmokeTest(
           });
         }
 
-        await exerciseContention(client, config, localToken, run, () => {
+        await exerciseContention(client, config, run, () => {
           locked = false;
         });
         const relock = await run("Reacquire after FIFO test", "vm_lock");
@@ -240,7 +237,6 @@ export async function runSmokeTest(
 async function exerciseContention(
   owner: BrokerClient,
   config: BrokerConfig,
-  localToken: string,
   run: (
     name: string,
     method: string,
@@ -252,7 +248,6 @@ async function exerciseContention(
 ): Promise<void> {
   const contender = await connectBroker({
     pipePath: config.pipePath,
-    localToken,
     sessionLabel: `smoke-contender:${process.pid}`,
     requestTimeoutMs: 20_000
   });
@@ -289,7 +284,6 @@ async function exerciseContention(
 
   const abandoned = await connectBroker({
     pipePath: config.pipePath,
-    localToken,
     sessionLabel: `smoke-disconnect:${process.pid}`,
     requestTimeoutMs: 20_000
   });

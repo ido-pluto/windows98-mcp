@@ -5,7 +5,6 @@ import {
   open,
   readFile,
   readdir,
-  realpath,
   rename,
   rm,
   writeFile
@@ -83,22 +82,16 @@ interface PullPartial {
 }
 
 export class TransferCoordinator {
-  readonly allowedRoots: string[];
   private readonly active = new Map<string, Set<ActiveTransfer>>();
   private readonly activeHostDestinations = new Set<string>();
   private readonly retainedHostPartials = new Map<string, Set<string>>();
 
   constructor(
-    allowedRoots: string[],
     private readonly requestGuest: GuestRequester,
     private readonly onResourceOpened: (sessionId: string, resource: string) => void,
     private readonly onResourceClosed: (sessionId: string, resource: string) => void,
     private readonly requestTimeoutMs: number
   ) {
-    this.allowedRoots = allowedRoots.map((root) => resolve(root));
-    if (this.allowedRoots.length === 0) {
-      throw new Error("HOST_ALLOWED_ROOTS_EMPTY");
-    }
   }
 
   async execute(
@@ -281,7 +274,6 @@ export class TransferCoordinator {
     const destination = await this.resolveHostPath(hostPath, false);
     await rejectCaseConflict(destination);
     await ensureDirectoryDestination(destination);
-    await this.assertNoSymlinks(destination, true);
     const entries = await this.collectGuestTree(sessionId, guestPath, transfer);
     this.assertActive(transfer);
     const summary = emptyProgress("guest-to-host", guestPath, destination);
@@ -290,7 +282,6 @@ export class TransferCoordinator {
       const target = resolveRelative(destination, entry.relativePath);
       await rejectCaseConflict(target);
       await mkdir(target, { recursive: true });
-      await this.assertNoSymlinks(target, true);
       summary.directories += 1;
     }
     for (const entry of entries.filter((item) => !item.isDirectory)) {
@@ -584,58 +575,8 @@ export class TransferCoordinator {
     mustExist: boolean
   ): Promise<string> {
     const candidate = resolve(input);
-    const root = this.allowedRoots
-      .filter((allowed) => isWithin(allowed, candidate))
-      .sort((left, right) => right.length - left.length)[0];
-    if (!root) {
-      throw new Error("HOST_PATH_OUTSIDE_ALLOWED_ROOTS");
-    }
-    await this.assertNoSymlinks(candidate, mustExist, root);
-    if (mustExist) {
-      const [realRoot, realCandidate] = await Promise.all([
-        realpath(root),
-        realpath(candidate)
-      ]);
-      if (!isWithin(realRoot, realCandidate)) {
-        throw new Error("HOST_PATH_OUTSIDE_ALLOWED_ROOTS");
-      }
-    }
+    if (mustExist) await lstat(candidate);
     return candidate;
-  }
-
-  private async assertNoSymlinks(
-    candidate: string,
-    mustExist: boolean,
-    knownRoot?: string
-  ): Promise<void> {
-    const root =
-      knownRoot ??
-      this.allowedRoots
-        .filter((allowed) => isWithin(allowed, candidate))
-        .sort((left, right) => right.length - left.length)[0];
-    if (!root) {
-      throw new Error("HOST_PATH_OUTSIDE_ALLOWED_ROOTS");
-    }
-    const rootInfo = await lstat(root);
-    if (rootInfo.isSymbolicLink()) {
-      throw new Error("HOST_ALLOWED_ROOT_IS_SYMLINK");
-    }
-    const relativePath = relative(root, candidate);
-    let current = root;
-    for (const part of relativePath.split(sep).filter(Boolean)) {
-      current = resolve(current, part);
-      try {
-        const info = await lstat(current);
-        if (info.isSymbolicLink()) {
-          throw new Error(`HOST_SYMLINK_REJECTED:${current}`);
-        }
-      } catch (error) {
-        if (isMissing(error) && !mustExist) {
-          return;
-        }
-        throw error;
-      }
-    }
   }
 
   private async prepareHostDestination(
@@ -644,7 +585,6 @@ export class TransferCoordinator {
   ): Promise<void> {
     const parent = dirname(hostPath);
     await mkdir(parent, { recursive: true });
-    await this.assertNoSymlinks(parent, true);
     await rejectCaseConflict(hostPath);
     try {
       const info = await lstat(hostPath);
@@ -992,6 +932,12 @@ function resolveRelative(root: string, portableRelativePath: string): string {
   return candidate;
 }
 
+/** Prevent a guest-provided directory entry from escaping its selected destination. */
+function isWithin(root: string, candidate: string): boolean {
+  const result = relative(resolve(root), resolve(candidate));
+  return result === "" || (!result.startsWith(`..${sep}`) && result !== ".." && !isAbsolute(result));
+}
+
 function joinGuestPath(root: string, portableRelativePath: string): string {
   return win32.join(root, ...portableRelativePath.split("/"));
 }
@@ -1007,11 +953,6 @@ function validateGuestEntryName(name: string): void {
   ) {
     throw new Error("GUEST_DIRECTORY_ENTRY_INVALID");
   }
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const result = relative(resolve(root), resolve(candidate));
-  return result === "" || (!result.startsWith(`..${sep}`) && result !== ".." && !isAbsolute(result));
 }
 
 function emptyProgress(

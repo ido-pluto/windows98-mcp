@@ -1,74 +1,46 @@
-import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   FrameDecoder,
   decodeHeader,
   encodeFrame,
-  encodeJson,
-  verifyFrameMac
+  encodeJson
 } from "../src/shared/protocol.js";
 import {
   FRAME_HEADER_BYTES,
   FrameType,
-  MAX_CONTROL_PAYLOAD
+  MAX_CONTROL_PAYLOAD,
+  PROTOCOL_VERSION
 } from "../src/shared/types.js";
 
-describe("wire protocol", () => {
-  it("decodes a frame arriving one byte at a time", () => {
-    const key = randomBytes(32);
+describe("protocol v2 wire framing", () => {
+  it("decodes an unauthenticated frame arriving one byte at a time", () => {
     const encoded = encodeFrame(
-      {
-        type: FrameType.Request,
-        flags: 0,
-        streamId: 7,
-        sequence: 42n
-      },
-      encodeJson({ hello: "windows 98" }),
-      key,
-      "host-to-guest"
+      { type: FrameType.Request, flags: 0, streamId: 7, sequence: 42n },
+      encodeJson({ hello: "windows 98" })
     );
     const decoder = new FrameDecoder();
     const decoded = [];
-    for (const byte of encoded) {
-      decoded.push(...decoder.push(Buffer.from([byte])));
-    }
+    for (const byte of encoded) decoded.push(...decoder.push(Buffer.from([byte])));
     expect(decoded).toHaveLength(1);
     expect(decoded[0]?.header.streamId).toBe(7);
     expect(decoded[0]?.header.sequence).toBe(42n);
+    expect(decoded[0]?.mac).toHaveLength(0);
     expect(decoded[0]?.payload.toString("utf8")).toContain("windows 98");
-    expect(
-      decoded[0] &&
-        verifyFrameMac(decoded[0], key, "host-to-guest")
-    ).toBe(true);
     expect(decoder.pendingBytes).toBe(0);
   });
 
-  it("decodes coalesced frames and rejects direction changes", () => {
-    const key = randomBytes(32);
+  it("decodes coalesced HELLO and READY frames without a MAC trailer", () => {
     const first = encodeFrame(
-      { type: FrameType.Ping, flags: 0, streamId: 0, sequence: 1n },
-      Buffer.alloc(0),
-      key,
-      "guest-to-host"
+      { type: FrameType.Hello, flags: 0, streamId: 0, sequence: 0n },
+      encodeJson({ kind: "guest_hello" })
     );
     const second = encodeFrame(
-      { type: FrameType.Pong, flags: 0, streamId: 0, sequence: 2n },
-      Buffer.alloc(0),
-      key,
-      "guest-to-host"
+      { type: FrameType.Ready, flags: 0, streamId: 0, sequence: 0n },
+      encodeJson({ kind: "ready", epoch: 1 })
     );
     const frames = new FrameDecoder().push(Buffer.concat([first, second]));
     expect(frames).toHaveLength(2);
-    expect(
-      frames.every((frame) =>
-        verifyFrameMac(frame, key, "guest-to-host")
-      )
-    ).toBe(true);
-    expect(
-      frames.some((frame) =>
-        verifyFrameMac(frame, key, "host-to-guest")
-      )
-    ).toBe(false);
+    expect(frames.map((frame) => frame.header.type)).toEqual([FrameType.Hello, FrameType.Ready]);
   });
 
   it("rejects invalid magic, unsupported versions, and oversized controls", () => {
@@ -76,11 +48,13 @@ describe("wire protocol", () => {
     header.write("NOPE", 0, "ascii");
     expect(() => decodeHeader(header)).toThrow("FRAME_MAGIC_INVALID");
 
-    const oversized = Buffer.alloc(FRAME_HEADER_BYTES);
-    oversized.write("W98M", 0, "ascii");
-    oversized.writeUInt16LE(1, 4);
-    oversized.writeUInt16LE(FrameType.Request, 6);
-    oversized.writeUInt32LE(MAX_CONTROL_PAYLOAD + 1, 24);
-    expect(() => decodeHeader(oversized)).toThrow("FRAME_LENGTH_EXCEEDED");
+    header.write("W98M", 0, "ascii");
+    header.writeUInt16LE(PROTOCOL_VERSION + 1, 4);
+    expect(() => decodeHeader(header)).toThrow("PROTOCOL_VERSION_UNSUPPORTED");
+
+    header.writeUInt16LE(PROTOCOL_VERSION, 4);
+    header.writeUInt16LE(FrameType.Request, 6);
+    header.writeUInt32LE(MAX_CONTROL_PAYLOAD + 1, 24);
+    expect(() => decodeHeader(header)).toThrow("FRAME_LENGTH_EXCEEDED");
   });
 });

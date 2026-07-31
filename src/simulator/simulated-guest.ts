@@ -1,10 +1,4 @@
-import {
-  createHash,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
-  type Hash
-} from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   mkdir,
@@ -25,7 +19,6 @@ import {
   decodeJson,
   encodeFrame,
   encodeJson,
-  verifyFrameMac
 } from "../shared/protocol.js";
 import {
   FrameType,
@@ -38,7 +31,6 @@ import {
 export interface SimulatedGuestOptions {
   host: string;
   port: number;
-  psk: Buffer;
   rootDirectory: string;
   reconnect?: boolean;
   width?: number;
@@ -89,9 +81,8 @@ export class SimulatedGuest extends EventEmitter {
     SimulatedGuestOptions;
   private socket: net.Socket | undefined;
   private decoder = new FrameDecoder();
-  private sessionKey: Buffer | undefined;
-  private guestNonce: Buffer | undefined;
-  private hostSequence = 0n;
+  private ready = false;
+  private hostSequence = 1n;
   private guestSequence = 1n;
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | undefined;
@@ -177,8 +168,8 @@ export class SimulatedGuest extends EventEmitter {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     this.decoder = new FrameDecoder();
-    this.sessionKey = undefined;
-    this.hostSequence = 0n;
+    this.ready = false;
+    this.hostSequence = 1n;
     this.guestSequence = 1n;
     const socket = net.createConnection({
       host: this.options.host,
@@ -202,33 +193,28 @@ export class SimulatedGuest extends EventEmitter {
   }
 
   private sendHello(): void {
-    this.guestNonce = randomBytes(32);
     const payload = encodeJson({
       kind: "guest_hello",
-      guestNonce: this.guestNonce.toString("base64"),
-      guestId: "simulated-win98",
-      guestBuildId: "simulator-1"
+      capabilities: this.capabilities()
     });
-    this.writeFrame(FrameType.Hello, payload, 0n, false);
+    this.writeFrame(FrameType.Hello, payload, 0n);
   }
 
   private onData(chunk: Buffer): void {
     try {
       for (const frame of this.decoder.push(chunk)) {
-        if (!this.sessionKey) {
+        if (!this.ready) {
           this.handleHandshakeFrame(frame.header.type, frame.payload);
           continue;
         }
-        if (
-          !verifyFrameMac(frame, this.sessionKey, "host-to-guest") ||
-          frame.header.sequence !== this.hostSequence + 1n
-        ) {
-          throw new Error("SIMULATOR_FRAME_AUTHENTICATION_FAILED");
+        if (frame.header.sequence !== this.hostSequence) {
+          throw new Error("SIMULATOR_FRAME_SEQUENCE_INVALID");
         }
-        this.hostSequence = frame.header.sequence;
+        this.hostSequence += 1n;
         switch (frame.header.type) {
-          case FrameType.Authenticated:
-            this.emit("authenticated");
+          case FrameType.Ready:
+            this.ready = true;
+            this.emit("connected");
             break;
           case FrameType.Request:
             void this.handleRequest(decodeJson<GuestRequest>(frame.payload));
@@ -250,50 +236,20 @@ export class SimulatedGuest extends EventEmitter {
   }
 
   private handleHandshakeFrame(type: FrameType, payload: Buffer): void {
-    if (type !== FrameType.Challenge || !this.guestNonce) {
+    if (type !== FrameType.Ready) {
       throw new Error("SIMULATOR_HANDSHAKE_ORDER_INVALID");
     }
-    const challenge = decodeJson<{
-      kind: "challenge";
-      hostNonce: string;
-      proof: string;
-    }>(payload);
-    const hostNonce = Buffer.from(challenge.hostNonce, "base64");
-    this.sessionKey = createHmac("sha256", this.options.psk)
-      .update("session-key\0", "ascii")
-      .update(this.guestNonce)
-      .update(hostNonce)
-      .digest();
-    const expectedHostProof = createHmac("sha256", this.sessionKey)
-      .update("host-proof\0", "ascii")
-      .digest();
-    const receivedHostProof = Buffer.from(challenge.proof, "base64");
-    if (
-      receivedHostProof.length !== expectedHostProof.length ||
-      !timingSafeEqual(receivedHostProof, expectedHostProof)
-    ) {
-      throw new Error("SIMULATOR_HOST_PROOF_INVALID");
-    }
-    const proof = createHmac("sha256", this.sessionKey)
-      .update("guest-proof\0", "ascii")
-      .digest("base64");
-    this.writeFrame(
-      FrameType.Authenticate,
-      encodeJson({
-        kind: "authenticate",
-        proof,
-        capabilities: this.capabilities()
-      }),
-      0n,
-      false
-    );
+    this.ready = true;
+    this.hostSequence = 1n;
+    this.guestSequence = 1n;
+    this.emit("connected");
   }
 
   private capabilities(): GuestCapabilities {
     return {
       guestId: "simulated-win98",
       guestBuildId: "simulator-1",
-      protocolVersion: 1,
+      protocolVersion: 2,
       osName: "Microsoft Windows 98 Second Edition",
       osVersion: "4.10.2222 A",
       ansiCodePage: 1252,
@@ -314,7 +270,8 @@ export class SimulatedGuest extends EventEmitter {
         "shell",
         "processes",
         "filesystem",
-        "system"
+        "system",
+        "show_message"
       ]
     };
   }
@@ -354,6 +311,14 @@ export class SimulatedGuest extends EventEmitter {
       this.shells.clear();
       await this.cleanupTransfers();
       return { sanitized: true };
+    }
+    if (method === "show_message") {
+      const message = String(params.message ?? "");
+      if (message.length === 0) {
+        throw new SimulatedError("MESSAGE_REQUIRED", "message is required");
+      }
+      this.inputEvents.push({ method, message });
+      return { accepted: true };
     }
     if (method === "screen_capture" || method === "window_capture") {
       return this.captureScreen();
@@ -1122,23 +1087,20 @@ export class SimulatedGuest extends EventEmitter {
   }
 
   private sendSigned(type: FrameType, payload: Buffer): void {
-    if (!this.sessionKey) throw new Error("SIMULATOR_NOT_AUTHENTICATED");
-    this.writeFrame(type, payload, this.guestSequence++, true);
+    if (!this.ready) throw new Error("SIMULATOR_NOT_READY");
+    this.writeFrame(type, payload, this.guestSequence++);
   }
 
   private writeFrame(
     type: FrameType,
     payload: Buffer,
-    sequence: bigint,
-    signed: boolean
+    sequence: bigint
   ): void {
     if (!this.socket || this.socket.destroyed) return;
     this.socket.write(
       encodeFrame(
         { type, flags: 0, streamId: 0, sequence },
-        payload,
-        signed ? this.sessionKey : undefined,
-        "guest-to-host"
+        payload
       )
     );
   }

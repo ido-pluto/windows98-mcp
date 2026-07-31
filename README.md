@@ -4,120 +4,68 @@
 [![npm](https://img.shields.io/npm/v/windows98-mcp)](https://www.npmjs.com/package/windows98-mcp)
 [![license](https://img.shields.io/npm/l/windows98-mcp)](./LICENSE)
 
-Control a real Windows 98 VM through 47 explicit Model Context Protocol (MCP)
-tools. Agents can take screenshots, use exact mouse and keyboard input, run and
+Control a real Windows 98 VM through explicit Model Context Protocol (MCP)
+tools. Agents can capture screens, use exact mouse and keyboard input, run and
 stream commands, manage windows and processes, use the clipboard, and transfer
-files and directories without relying on Computer Use for ordinary VM work.
+files and directories without ordinary Computer Use.
 
-**[Download the latest Windows 98 guest](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip)** ·
-[SHA-256](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip.sha256) ·
+**[Download the Windows 98 guest](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip)** ·
+**[Download the Windows admin app](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-x64.zip)** ·
 [All releases](https://github.com/ido-pluto/windows98-mcp/releases/latest) ·
 [npm package](https://www.npmjs.com/package/windows98-mcp)
 
-The GitHub repository is private, so release links require an account that can
-access it. The npm package is public.
-
 ## How it works
 
-`WIN98CTL.EXE` is a C89 Windows 98 guest agent. It maintains an authenticated
-outbound TCP connection to a TypeScript broker on the host-only VM network.
-Every MCP client connects to the singleton broker through a local named pipe.
-The broker provides exclusive leases so two agents cannot control the same VM
-at the same time.
+`WIN98CTL.EXE` is a C89 Windows 98 guest agent. It opens and maintains an
+outbound TCP connection to a singleton broker on the host. MCP clients and the
+Windows admin app both use that same broker through one local named pipe, so
+the exclusive lease prevents control collisions.
 
-Guest traffic is integrity-protected with HMAC-SHA256 but is **not encrypted**.
-Use an isolated host-only network and never expose the guest listener publicly.
-
-## Requirements
-
-- Node.js 22.17 or newer on the host.
-- Windows 98 Second Edition with Winsock 2 in a VM.
-- A VMware/VirtualBox host-only adapter shared by the host and guest.
-- The host-only IPv4 address of the host and the IPv4 address assigned to the
-  Windows 98 guest.
-
-The verified development setup uses host `192.168.60.1` and guest
-`192.168.60.128` on a `/24` host-only network.
+The transport intentionally has **no authentication or authorization**. Keep
+it only on an isolated disposable VM network. The framing, sequence numbers,
+CRC32, and SHA-256 values remain to detect corrupted or malformed data; they
+do not provide security.
 
 ## Quick start
 
-Download and extract the
-[latest Windows 98 guest ZIP](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip)
-on the host. Then, from the workspace that agents may access, generate the
-matching host config and `WIN98CTL.INI` inside that extracted release folder:
+1. Download and extract the guest ZIP on the host.
+2. Edit `WIN98CTL.INI` directly. Set `host` to the host-only adapter IPv4
+   address visible from Windows 98 and choose a TCP `port` (default `9898`).
+3. Copy the complete folder to `C:\WIN98CTL` in Windows 98. Run `RUNTEST.BAT`,
+   then start `WIN98CTL.EXE` and leave its small status window open.
+4. Download and run the Windows admin app. Set the same port in its connection
+   panel. It starts the broker and shows guest status.
+5. Configure Codex to run the published MCP:
 
-```powershell
-npx -y windows98-mcp@latest configure `
-  --bind 192.168.60.1 `
-  --ip 192.168.60.128 `
-  --guest-dir "C:\Downloads\windows98-mcp-guest"
-```
-
-This creates two matching local configurations:
-
-- `.win98-mcp/config.json` in the current workspace: broker bind address,
-  expected guest IP, random PSK, allowed host root, and state location.
-- `WIN98CTL.INI` in the extracted guest folder: host address, port, identity,
-  and the same PSK. Running `configure` again reuses the existing PSK.
-
-Copy the complete configured release folder to `C:\WIN98CTL` in Windows 98.
-Then:
-
-1. Run `RUNTEST.BAT`.
-2. If it reports `PASS`, run `WIN98CTL.EXE` and leave its small status window
-   open.
-3. On the host, verify the connection:
-
-   ```powershell
-   npx -y windows98-mcp@latest doctor --ip 192.168.60.128
-   npx -y windows98-mcp@latest smoke-test --ip 192.168.60.128
+   ```toml
+   [mcp_servers.win98]
+   command = "npx"
+   args = ["-y", "windows98-mcp@latest"]
+   startup_timeout_sec = 20
+   tool_timeout_sec = 1860
+   required = false
    ```
 
-4. After the smoke test passes, run `INSTALL.BAT` in Windows 98 to start the
-   guest agent at login.
+The guest retries its outbound connection every two seconds. Guest-dependent
+MCP calls wait up to five seconds for it to reconnect, then return
+`GUEST_CONNECT_TIMEOUT`. Status and capability calls return immediately.
 
-The guest retries every two seconds forever when the broker is offline or
-restarted.
+The verified development host-only setup uses host `192.168.60.1` and guest
+`192.168.60.128`; edit the guest INI for your own adapter address.
 
-## MCP client configuration
+## Windows admin app
 
-Running the package without a subcommand starts the stdio MCP adapter. `--ip`
-is the **expected Windows 98 guest source IP**; the guest still connects
-outbound to the host address stored in `WIN98CTL.INI`.
+The portable Windows x64 Tauri app is a small operator/test console for the
+same broker used by MCP. It persists only the listener port and provides:
 
-Codex project configuration (`.codex/config.toml`):
+- Guest connection status and capabilities.
+- A Windows 98 message popup.
+- Streaming command output with terminate/close controls.
+- File and directory push/pull with progress.
+- Screenshot preview and native save.
 
-```toml
-[mcp_servers.win98]
-command = "npx"
-args = ["-y", "windows98-mcp@latest", "--ip", "192.168.60.128"]
-cwd = 'C:\path\to\your\workspace'
-startup_timeout_sec = 20
-tool_timeout_sec = 1860
-required = false
-```
-
-Generic MCP JSON configuration:
-
-```json
-{
-  "mcpServers": {
-    "win98": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "windows98-mcp@latest",
-        "--ip",
-        "192.168.60.128"
-      ],
-      "cwd": "C:\\path\\to\\your\\workspace"
-    }
-  }
-}
-```
-
-The configured `cwd` must contain the `.win98-mcp/config.json` generated by
-`configure`, or set `WIN98_MCP_CONFIG` to an absolute config path.
+Changing its port restarts the local broker after active terminal and transfer
+work is closed. The guest INI must use the same port.
 
 ## CLI
 
@@ -126,25 +74,17 @@ windows98-mcp [command] [options]
 
 broker              Run the long-lived singleton broker
 stdio               Run the stdio MCP adapter (the default)
-configure           Match the host config to a downloaded guest release
 doctor              Check the broker, guest, and capabilities
-simulator           Run the deterministic simulated guest
+simulator           Run the deterministic simulated Windows 98 guest
 smoke-test          Exercise a connected guest inside C:\MCPTEST
 diagnostics [dir]   Collect sanitized diagnostics
 
---ip <guest-ip>     Accept only this Windows 98 guest IPv4 address
---bind <host-ip>    Override the host-only listener address
---port <port>       Override TCP port 9898
---config <file>     Use a specific broker config
---state-dir <dir>   Override logs/artifacts state directory
---host-root <dir>   Add an allowed host transfer root (repeatable)
+--port <port>       Override the runtime listener port (default: 9898)
+--state-dir <dir>   Override local broker state storage
 ```
 
-`configure` additionally requires `--guest-dir <extracted-release-folder>`.
-
-Equivalent environment variables include `WIN98_MCP_GUEST_IP`,
-`WIN98_MCP_BIND_HOST`, `WIN98_MCP_GUEST_PORT`, `WIN98_MCP_CONFIG`,
-`WIN98_MCP_STATE_DIR`, `WIN98_MCP_HOST_ROOTS`, and `WIN98_MCP_PSK`.
+The Tauri app normally owns the port setting. `--port` is available for
+headless use and must match `WIN98CTL.INI`.
 
 ## MCP tools
 
@@ -152,18 +92,17 @@ The tool groups are:
 
 - Lease and status: `vm_status`, `vm_capabilities`, `vm_lock`, `vm_wait`,
   `vm_unlock`.
-- Screen and input: `screen_capture`, eight mouse tools, five keyboard tools,
-  and `input_batch`.
-- Desktop: clipboard get/set plus window list, focus, close, and capture.
-- Commands: one-shot shell execution and cursor-based interactive terminal
-  sessions.
+- Screen and input: screenshot, mouse, keyboard, and input batch tools.
+- Desktop: clipboard and window control.
+- Commands: one-shot shell execution and cursor-based interactive terminals.
+- Message: `show_message` displays a Windows 98 popup.
 - System and files: processes, filesystem primitives, resumable file transfer,
   and merging directory transfer.
 
-The first VM-affecting tool atomically acquires the lease. Status calls do not.
-Every operational result reminds the caller that the VM remains locked and
-must be released with `vm_unlock`. Inactive leases expire after 30 minutes;
-disconnect cleanup also releases held keys, buttons, terminals, and transfers.
+The first VM-affecting tool atomically acquires the lease. Every operational
+result reminds callers to release it with `vm_unlock`. Inactive leases expire
+after 30 minutes; disconnect cleanup releases held keys, buttons, terminals,
+and transfers.
 
 ## Development
 
@@ -180,9 +119,9 @@ powershell -File scripts/build-guest.ps1 -Clean
 powershell -File scripts/stage-release.ps1
 ```
 
-The test suite includes deterministic protocol, broker, MCP, lease, transfer,
-artifact, and input tests. The guest build audits the PE32 GUI subsystem (4.0)
-and permits imports only from Windows 98 system DLLs.
+The guest build audits the PE32 GUI subsystem and permits imports only from
+Windows 98 system DLLs. The admin app has its own Tauri build instructions in
+`admin/README.md`.
 
 ## Limitations
 

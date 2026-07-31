@@ -3,7 +3,6 @@ import type { BrokerConfigFile } from "./host/config.js";
 export const CLI_COMMANDS = [
   "broker",
   "stdio",
-  "configure",
   "doctor",
   "simulator",
   "smoke-test",
@@ -30,7 +29,6 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
   const commandArgs: string[] = [];
   const configArgs: string[] = [];
   const overrides: BrokerConfigFile = {};
-  const hostRoots: string[] = [];
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -46,18 +44,6 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     }
 
     const option = splitOption(token);
-    if (option.name === "--ip" || option.name === "--guest-ip") {
-      const value = option.value ?? requireValue(argv, ++index, option.name);
-      overrides.expectedGuestIp = value;
-      configArgs.push("--ip", value);
-      continue;
-    }
-    if (option.name === "--bind") {
-      const value = option.value ?? requireValue(argv, ++index, option.name);
-      overrides.bindHost = value;
-      configArgs.push("--bind", value);
-      continue;
-    }
     if (option.name === "--port") {
       const value = option.value ?? requireValue(argv, ++index, option.name);
       const port = Number(value);
@@ -78,12 +64,6 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       configArgs.push("--state-dir", value);
       continue;
     }
-    if (option.name === "--host-root") {
-      const value = option.value ?? requireValue(argv, ++index, option.name);
-      hostRoots.push(value);
-      configArgs.push("--host-root", value);
-      continue;
-    }
 
     if (!command && COMMANDS.has(token)) {
       command = token as CliCommand;
@@ -98,7 +78,6 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     commandArgs.push(token);
   }
 
-  if (hostRoots.length > 0) overrides.hostAllowedRoots = hostRoots;
   return {
     command: command ?? "stdio",
     commandArgs,

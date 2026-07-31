@@ -13,12 +13,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node scripts/write-package-info.mjs && tsc -p tsconfig.json",
+    "clean": "node scripts/clean-dist.mjs",
+    "build": "npm run clean && node scripts/write-package-info.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/cli.ts",
     "broker": "tsx src/cli.ts broker",
     "mcp": "tsx src/cli.ts stdio",
-    "configure": "tsx src/cli.ts configure",
     "doctor": "tsx src/cli.ts doctor",
     "simulator": "tsx src/cli.ts simulator",
     "smoke-test": "tsx src/cli.ts smoke-test",

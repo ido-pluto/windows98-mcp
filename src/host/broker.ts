@@ -1,9 +1,4 @@
-import {
-  createHmac,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual
-} from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, unlink } from "node:fs/promises";
 import {
   createServer,
@@ -18,7 +13,6 @@ import {
   encodeFrame,
   encodeJson,
   FrameDecoder,
-  verifyFrameMac
 } from "../shared/protocol.js";
 import {
   FrameType,
@@ -35,7 +29,6 @@ import {
 } from "../shared/types.js";
 import { ArtifactStore, type StoredArtifact } from "./artifacts.js";
 import {
-  deriveLocalAdapterToken,
   loadBrokerConfig,
   publicConfig,
   type BrokerConfig,
@@ -51,25 +44,11 @@ import {
 
 interface GuestHelloMessage {
   kind: "guest_hello";
-  guestNonce: string;
-  guestId?: string;
-  guestBuildId?: string;
-}
-
-interface ChallengeMessage {
-  kind: "challenge";
-  hostNonce: string;
-  proof: string;
-}
-
-interface AuthenticateMessage {
-  kind: "authenticate";
-  proof: string;
   capabilities: GuestCapabilities;
 }
 
-interface AuthenticatedMessage {
-  kind: "authenticated";
+interface ReadyMessage {
+  kind: "ready";
   epoch: number;
 }
 
@@ -149,17 +128,14 @@ export class Broker {
   private capabilities: GuestCapabilities | undefined;
   private cleanupChain: Promise<void> = Promise.resolve();
   private heartbeatTimer: NodeJS.Timeout | undefined;
-  private readonly localAdapterToken: string;
 
   constructor(readonly config: BrokerConfig) {
-    this.localAdapterToken = deriveLocalAdapterToken(config.psk);
     this.lease = new LeaseManager(config.leaseTtlMs, config.waitTicketTtlMs);
     this.artifacts = new ArtifactStore(config.artifactDir, config.maxArtifactBytes);
     this.logger = new JsonlLogger(config.logPath);
     this.transfers = new TransferCoordinator(
-      config.hostAllowedRoots ?? [process.cwd()],
       async (sessionId, method, params, timeoutMs) => {
-        if (!this.guest?.authenticated || this.guest.closed) {
+        if (!this.guest?.ready || this.guest.closed) {
           throw new Error("GUEST_NOT_CONNECTED");
         }
         return this.guest.request(sessionId, method, params, timeoutMs);
@@ -207,7 +183,6 @@ export class Broker {
     if (this.started) {
       return;
     }
-    this.assertSafeConfig();
     await Promise.all([
       mkdir(dirname(this.config.logPath), { recursive: true }),
       mkdir(this.config.artifactDir, { recursive: true }),
@@ -312,19 +287,19 @@ export class Broker {
       return local;
     }
 
-    if (this.connectionState.state !== "online" || !this.guest?.authenticated) {
+    if (!(await this.waitForGuest())) {
       return this.brokerResponse(
         requestId,
         this.result(
           sessionId,
           requestId,
           false,
-          this.connectionState.state === "sanitizing" ? "VM_SANITIZING" : "VM_OFFLINE",
+          this.connectionState.state === "sanitizing" ? "VM_SANITIZING" : "GUEST_CONNECT_TIMEOUT",
           this.connectionState.state === "sanitizing"
             ? "The guest is connected but cleanup is still in progress."
-            : "No authenticated Windows 98 guest is connected.",
+            : "Windows 98 did not connect to the host listener within 5 seconds.",
           true,
-          "Start WIN98CTL.EXE in the VM and verify its host address and PSK."
+          "Start WIN98CTL.EXE and verify the host IP and port in WIN98CTL.INI."
         )
       );
     }
@@ -395,7 +370,9 @@ export class Broker {
           )
         );
         }
-        const guestResponse = await this.guest.request(
+        const guest = this.guest;
+        if (!guest) throw new Error("GUEST_NOT_CONNECTED");
+        const guestResponse = await guest.request(
           sessionId,
           method,
           params,
@@ -707,9 +684,6 @@ export class Broker {
       if (!isBrokerHello(message)) {
         throw new Error("BROKER_HELLO_REQUIRED");
       }
-      if (!constantTimeTextEqual(message.localAuth, this.localAdapterToken)) {
-        throw new Error("BROKER_LOCAL_AUTH_FAILED");
-      }
       if (this.adapters.has(message.sessionId)) {
         throw new Error("SESSION_ALREADY_CONNECTED");
       }
@@ -760,19 +734,6 @@ export class Broker {
   }
 
   private acceptGuest(socket: Socket): void {
-    if (
-      this.config.expectedGuestIp &&
-      normalizeRemoteAddress(socket.remoteAddress) !== this.config.expectedGuestIp
-    ) {
-      const remoteAddress = socket.remoteAddress;
-      socket.destroy();
-      this.logger.write("warn", "guest_rejected", {
-        reason: "unexpected_source_ip",
-        expectedGuestIp: this.config.expectedGuestIp,
-        remoteAddress
-      });
-      return;
-    }
     if (this.guest && !this.guest.closed) {
       socket.end();
       this.logger.write("warn", "guest_rejected", { reason: "already_connected" });
@@ -790,7 +751,7 @@ export class Broker {
     );
     this.guest = guest;
     this.connectionState = {
-      state: "authenticating",
+      state: "connecting",
       epoch: this.connectionEpoch,
       connectedAt: new Date().toISOString(),
       ...(socket.remoteAddress ? { remoteAddress: socket.remoteAddress } : {})
@@ -878,7 +839,7 @@ export class Broker {
       }
       this.openResources.delete(sessionId);
       const guest = this.guest;
-      if (!cleanupFailed && guest?.authenticated && !guest.closed) {
+      if (!cleanupFailed && guest?.ready && !guest.closed) {
         this.connectionState = {
           ...this.connectionState,
           state: "sanitizing"
@@ -1043,23 +1004,20 @@ export class Broker {
       guest.destroy();
       return;
     }
-    if (guest.authenticated) {
+    if (guest.ready) {
       guest.sendPing();
     }
   }
 
-  private assertSafeConfig(): void {
-    if (this.config.psk.length < 32) {
-      throw new Error("PSK_TOO_SHORT");
+  private async waitForGuest(): Promise<boolean> {
+    if (this.connectionState.state === "online" && this.guest?.ready && !this.guest.closed) return true;
+    const deadline = Date.now() + this.config.guestConnectTimeoutMs;
+    while (Date.now() < deadline) {
+      if (this.connectionState.state === "online" && this.guest?.ready && !this.guest.closed) return true;
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
+    return false;
   }
-}
-
-function normalizeRemoteAddress(address: string | undefined): string | undefined {
-  if (address?.startsWith("::ffff:")) {
-    return address.slice("::ffff:".length);
-  }
-  return address;
 }
 
 export async function startBroker(
@@ -1073,15 +1031,12 @@ export async function startBroker(
 }
 
 class GuestConnection {
-  authenticated = false;
+  ready = false;
   closed = false;
   lastSeenAt = Date.now();
 
   private readonly decoder = new FrameDecoder();
-  private phase: "hello" | "authenticate" | "authenticated" = "hello";
-  private guestNonce: Buffer | undefined;
-  private hostNonce: Buffer | undefined;
-  private sessionKey: Buffer | undefined;
+  private phase: "hello" | "ready" = "hello";
   private txSequence = 1n;
   private rxSequence = 1n;
   private nextStreamId = 1;
@@ -1112,8 +1067,8 @@ class GuestConnection {
 
   start(): void {
     this.handshakeTimer = setTimeout(
-      () => this.fail(new Error("HANDSHAKE_TIMEOUT")),
-      this.config.handshakeTimeoutMs
+      () => this.fail(new Error("GUEST_HELLO_TIMEOUT")),
+      this.config.guestConnectTimeoutMs
     );
     this.handshakeTimer.unref();
     this.socket.on("data", (chunk: Buffer) => {
@@ -1141,7 +1096,7 @@ class GuestConnection {
     params: Record<string, unknown>,
     timeoutMs: number
   ): Promise<GuestResponse> {
-    if (!this.authenticated || this.closed || !this.sessionKey) {
+    if (!this.ready || this.closed) {
       throw new Error("GUEST_NOT_CONNECTED");
     }
     const requestId = randomUUID();
@@ -1160,7 +1115,7 @@ class GuestConnection {
       timer.unref();
       this.pending.set(requestId, { method, resolve, reject, timer });
       try {
-        this.sendSigned(FrameType.Request, this.nextStreamId++, encodeJson(request));
+        this.sendFrame(FrameType.Request, this.nextStreamId++, encodeJson(request));
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
@@ -1177,8 +1132,8 @@ class GuestConnection {
   }
 
   sendPing(): void {
-    if (this.authenticated && !this.closed) {
-      this.sendSigned(FrameType.Ping, 0, Buffer.alloc(0));
+    if (this.ready && !this.closed) {
+      this.sendFrame(FrameType.Ping, 0, Buffer.alloc(0));
     }
   }
 
@@ -1187,25 +1142,14 @@ class GuestConnection {
   }
 
   private async handleFrame(frame: ReturnType<FrameDecoder["push"]>[number]): Promise<void> {
-    if (this.phase !== "authenticated") {
-      this.assertUnsignedHandshakeFrame(frame);
-      if (this.phase === "hello") {
-        await this.handleHello(frame);
-      } else {
-        await this.handleAuthenticate(frame);
-      }
+    if (this.phase !== "ready") {
+      await this.handleHello(frame);
       return;
-    }
-    if (!this.sessionKey) {
-      throw new Error("SESSION_KEY_MISSING");
     }
     if (frame.header.sequence !== this.rxSequence) {
       throw new Error(
         `FRAME_SEQUENCE_INVALID:${frame.header.sequence.toString()}:${this.rxSequence.toString()}`
       );
-    }
-    if (!verifyFrameMac(frame, this.sessionKey, "guest-to-host")) {
-      throw new Error("FRAME_MAC_INVALID");
     }
     this.rxSequence += 1n;
     this.lastSeenAt = Date.now();
@@ -1228,7 +1172,7 @@ class GuestConnection {
       return;
     }
     if (frame.header.type === FrameType.Ping) {
-      this.sendSigned(FrameType.Pong, frame.header.streamId, frame.payload);
+      this.sendFrame(FrameType.Pong, frame.header.streamId, frame.payload);
       return;
     }
     if (frame.header.type === FrameType.Pong || frame.header.type === FrameType.Event) {
@@ -1250,67 +1194,24 @@ class GuestConnection {
       throw new Error("GUEST_HELLO_REQUIRED");
     }
     const hello = decodeJson<GuestHelloMessage>(frame.payload);
-    if (
-      hello.kind !== "guest_hello" ||
-      typeof hello.guestNonce !== "string"
-    ) {
+    if (hello.kind !== "guest_hello" || !isCapabilities(hello.capabilities)) {
       throw new Error("GUEST_HELLO_INVALID");
     }
-    this.guestNonce = decodeNonce(hello.guestNonce);
-    this.hostNonce = randomBytes(32);
-    this.sessionKey = deriveSessionKey(
-      this.config.psk,
-      this.guestNonce,
-      this.hostNonce
-    );
-    const challenge: ChallengeMessage = {
-      kind: "challenge",
-      hostNonce: this.hostNonce.toString("base64"),
-      proof: roleProof(this.sessionKey, "host-proof").toString("base64")
-    };
-    this.sendUnsigned(FrameType.Challenge, encodeJson(challenge));
-    this.phase = "authenticate";
-  }
-
-  private async handleAuthenticate(
-    frame: ReturnType<FrameDecoder["push"]>[number]
-  ): Promise<void> {
-    if (
-      frame.header.type !== FrameType.Authenticate ||
-      !this.guestNonce ||
-      !this.hostNonce ||
-      !this.sessionKey
-    ) {
-      throw new Error("GUEST_AUTHENTICATE_REQUIRED");
-    }
-    const authenticate = decodeJson<AuthenticateMessage>(frame.payload);
-    if (
-      authenticate.kind !== "authenticate" ||
-      typeof authenticate.proof !== "string" ||
-      !isCapabilities(authenticate.capabilities)
-    ) {
-      throw new Error("GUEST_AUTHENTICATE_INVALID");
-    }
-    const actualProof = decodeProof(authenticate.proof);
-    const expectedProof = roleProof(this.sessionKey, "guest-proof");
-    if (!timingSafeEqual(actualProof, expectedProof)) {
-      throw new Error("GUEST_AUTHENTICATION_FAILED");
-    }
-    this.capabilities = authenticate.capabilities;
+    this.capabilities = hello.capabilities;
     this.epoch = this.nextEpoch();
-    this.phase = "authenticated";
-    this.authenticated = true;
+    this.phase = "ready";
+    this.ready = true;
     this.txSequence = 1n;
     this.rxSequence = 1n;
     if (this.handshakeTimer) {
       clearTimeout(this.handshakeTimer);
       this.handshakeTimer = undefined;
     }
-    const authenticated: AuthenticatedMessage = {
-      kind: "authenticated",
+    const ready: ReadyMessage = {
+      kind: "ready",
       epoch: this.epoch
     };
-    this.sendSigned(FrameType.Authenticated, 0, encodeJson(authenticated));
+    this.write(encodeFrame({ type: FrameType.Ready, flags: 0, streamId: 0, sequence: 0n }, encodeJson(ready)));
     const now = new Date().toISOString();
     this.onState(
       {
@@ -1318,12 +1219,12 @@ class GuestConnection {
         epoch: this.epoch,
         connectedAt: now,
         lastSeenAt: now,
-        guestBuildId: authenticate.capabilities.guestBuildId,
+        guestBuildId: hello.capabilities.guestBuildId,
         ...(this.socket.remoteAddress
           ? { remoteAddress: this.socket.remoteAddress }
           : {})
       },
-      authenticate.capabilities
+      hello.capabilities
     );
   }
 
@@ -1335,38 +1236,13 @@ class GuestConnection {
     );
   }
 
-  private assertUnsignedHandshakeFrame(
-    frame: ReturnType<FrameDecoder["push"]>[number]
-  ): void {
-    if (
-      frame.header.sequence !== 0n ||
-      frame.mac.some((byte) => byte !== 0)
-    ) {
-      throw new Error("HANDSHAKE_FRAME_INVALID");
-    }
-  }
-
-  private sendUnsigned(type: FrameType, payload: Buffer): void {
-    this.write(
-      encodeFrame(
-        { type, flags: 0, streamId: 0, sequence: 0n },
-        payload
-      )
-    );
-  }
-
-  private sendSigned(type: FrameType, streamId: number, payload: Buffer): void {
-    if (!this.sessionKey) {
-      throw new Error("SESSION_KEY_MISSING");
-    }
+  private sendFrame(type: FrameType, streamId: number, payload: Buffer): void {
     const sequence = this.txSequence;
     this.txSequence += 1n;
     this.write(
       encodeFrame(
         { type, flags: 0, streamId, sequence },
-        payload,
-        this.sessionKey,
-        "host-to-guest"
+        payload
       )
     );
   }
@@ -1442,17 +1318,7 @@ function isBrokerHello(value: unknown): value is BrokerHello {
     typeof value["sessionId"] === "string" &&
     value["sessionId"].length >= 8 &&
     typeof value["sessionLabel"] === "string" &&
-    value["sessionLabel"].length > 0 &&
-    typeof value["localAuth"] === "string"
-  );
-}
-
-function constantTimeTextEqual(left: string, right: string): boolean {
-  const leftBytes = Buffer.from(left, "utf8");
-  const rightBytes = Buffer.from(right, "utf8");
-  return (
-    leftBytes.length === rightBytes.length &&
-    timingSafeEqual(leftBytes, rightBytes)
+    value["sessionLabel"].length > 0
   );
 }
 
@@ -1513,27 +1379,6 @@ function isBinaryDescriptor(value: unknown): value is BinaryDescriptor {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function deriveSessionKey(
-  psk: Buffer,
-  guestNonce: Buffer,
-  hostNonce: Buffer
-): Buffer {
-  return createHmac("sha256", psk)
-    .update("session-key\0", "ascii")
-    .update(guestNonce)
-    .update(hostNonce)
-    .digest();
-}
-
-function roleProof(
-  sessionKey: Buffer,
-  role: "host-proof" | "guest-proof"
-): Buffer {
-  return createHmac("sha256", sessionKey)
-    .update(`${role}\0`, "ascii")
-    .digest();
 }
 
 function capabilitySupports(commands: string[], method: string): boolean {
@@ -1627,22 +1472,6 @@ function normalizeImageToPng(image: Buffer, mimeType: string): Buffer {
     return convertBmp24ToPng(image);
   }
   throw new Error(`IMAGE_MIME_UNSUPPORTED:${mimeType}`);
-}
-
-function decodeNonce(value: string): Buffer {
-  const nonce = decodeStrictBase64(value);
-  if (nonce.length !== 32) {
-    throw new Error("NONCE_LENGTH_INVALID");
-  }
-  return nonce;
-}
-
-function decodeProof(value: string): Buffer {
-  const proof = decodeStrictBase64(value);
-  if (proof.length !== 32) {
-    throw new Error("AUTH_PROOF_LENGTH_INVALID");
-  }
-  return proof;
 }
 
 function decodeStrictBase64(value: string): Buffer {
@@ -1792,7 +1621,7 @@ function asError(error: unknown): Error {
 function isBrokerConfig(
   value: BrokerConfig | LoadBrokerConfigOptions
 ): value is BrokerConfig {
-  return "psk" in value && Buffer.isBuffer(value.psk);
+  return "guestPort" in value && "pipePath" in value;
 }
 
 export function connectToBrokerPipe(pipePath: string): Socket {

@@ -58,3 +58,27 @@ jobs:
             out/release/windows98-mcp-guest.zip
             out/release/windows98-mcp-guest.zip.sha256
           if-no-files-found: error
+
+  windows-admin:
+    name: Windows x64 admin app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm ci --prefix admin
+      - run: npm --prefix admin run build
+      - name: Build portable admin release asset
+        shell: powershell
+        run: ./scripts/stage-admin-release.ps1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows98-mcp-admin-windows-x64
+          path: |
+            out/release/windows98-mcp-admin-windows-x64.zip
+            out/release/windows98-mcp-admin-windows-x64.zip.sha256
+          if-no-files-found: error

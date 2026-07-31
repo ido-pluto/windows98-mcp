@@ -23,6 +23,14 @@
             "label": "Windows 98 guest SHA-256"
           },
           {
+            "path": "out/release/windows98-mcp-admin-windows-x64.zip",
+            "label": "Windows x64 admin app"
+          },
+          {
+            "path": "out/release/windows98-mcp-admin-windows-x64.zip.sha256",
+            "label": "Windows x64 admin app SHA-256"
+          },
+          {
             "path": "out/release/windows98-mcp-*.tgz",
             "label": "npm package tarball"
           }

@@ -16,13 +16,13 @@
   input.
 - Run `node dist/src/cli.js doctor` before live debugging and
   `node dist/src/cli.js smoke-test` after copying a new guest build.
-- The guest connection is authenticated but not encrypted. Keep it on the
-  VMware host-only network and never change the broker bind address to a public
-  interface.
+- The guest connection is deliberately unauthenticated for this isolated test
+  environment. Keep it on a private VMware host-only network and never expose
+  its TCP listener beyond that network.
 
 ## Verification
 
 - Host: `npm run typecheck`, `npm test`, `npm run build`, and
   `npm audit --audit-level=moderate`.
 - Guest: `powershell -File scripts/build-guest.ps1 -Clean`.
-- VM package: `powershell -File scripts/stage-vm.ps1 -HostAddress <host-only-IP>`.
+- VM package: `powershell -File scripts/stage-vm.ps1 -HostAddress <host-only-IP> -Port 9898`.

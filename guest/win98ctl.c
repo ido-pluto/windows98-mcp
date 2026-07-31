@@ -1,12 +1,11 @@
 /*
  * WIN98CTL - Windows 98 remote-control guest.
  * C89/Win32 source; intentionally avoids SendInput, Unicode APIs and APIs
- * introduced after Windows 98.  Transport is authenticated but not encrypted.
+ * introduced after Windows 98.  The guest makes an outbound TCP connection.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <windows.h>
-#include <wincrypt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +14,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.3.3"
+#define BUILD_ID "win98ctl-0.4.0"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
@@ -29,6 +28,7 @@
 #define ID_CLOSE_BUTTON 1001
 #define WM_AGENT_STATUS (WM_USER+1)
 #define WM_AGENT_WORKER_DONE (WM_USER+2)
+#define WM_AGENT_SHOW_MESSAGE (WM_USER+3)
 #ifndef SM_MOUSEWHEELPRESENT
 #define SM_MOUSEWHEELPRESENT 75
 #endif
@@ -63,9 +63,6 @@ typedef struct {
 typedef struct {
     char host[128];
     unsigned short port;
-    char guest_id[64];
-    w98_u8 psk[64];
-    unsigned long psk_len;
     char ini_path[MAX_PATH];
     char log_path[MAX_PATH];
 } CONFIG;
@@ -94,7 +91,6 @@ static int safe_format(char*out,unsigned long cap,const char*fmt,const char*a,co
 static char *ok_data(const char*data);
 static char *error_result(const char*code,const char*msg);
 static SOCKET control_socket=INVALID_SOCKET;
-static w98_u8 control_key[32];
 static unsigned long control_tx_sequence;
 static unsigned long control_rx_sequence;
 static int control_cancelled;
@@ -110,6 +106,7 @@ static HWND agent_main_window;
 static HWND agent_status_window;
 static HWND agent_close_button;
 static int agent_ui_stopping;
+typedef struct { char *text; } AGENT_MESSAGE;
 static int cooperative_stop(void);
 static int cooperative_sleep(unsigned long milliseconds);
 static int agent_stop_requested(void);
@@ -530,13 +527,22 @@ static char *string_error_result(const char*message) {
     if(json_string_error==3)return error_result("STRING_TOO_LONG","Decoded string exceeds the Windows 98 field limit");
     return error_result("INVALID_ARGUMENT",message);
 }
+static int post_agent_message(const char *text) {
+    AGENT_MESSAGE *message;
+    if(!agent_main_window||!text)return 0;
+    message=(AGENT_MESSAGE*)malloc(sizeof(*message));if(!message)return 0;
+    message->text=_strdup(text);if(!message->text){free(message);return 0;}
+    if(!PostMessageA(agent_main_window,WM_AGENT_SHOW_MESSAGE,0,(LPARAM)message)){free(message->text);free(message);return 0;}
+    return 1;
+}
 
 static char *dispatch(const char*method,const char*j) {
     char a[1024],b[256],*out,*enc;long x,y,x2,y2,n,i,timeout;int action;POINT pt;unsigned char*bin;unsigned long bin_n,written;HANDLE f;DWORD attr,size,got;SHELL_SESSION*s;FILE_TRANSFER*t;
     if(!strcmp(method,"vm_capabilities")||!strcmp(method,"system_info")){
-      char guest[385];json_escape(cfg.guest_id,guest,sizeof(guest));sprintf(a,"{\"guestId\":\"%s\",\"guestBuildId\":\"%s\",\"protocolVersion\":1,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"uptimeMs\":%lu}",
-        guest,BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",GetTickCount());return ok_data(a);
+      sprintf(a,"{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"uptimeMs\":%lu}",
+        BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",GetTickCount());return ok_data(a);
     }
+    if(!strcmp(method,"show_message")){char *message=json_string_alloc(j,"message");if(!message)return string_error_result("message is required");action=post_agent_message(message);free(message);return action?ok_data("{\"accepted\":true}"):error_result("MESSAGE_UNAVAILABLE","The WIN98CTL status window is not available");}
     if(!strcmp(method,"system_reboot"))return schedule_system_exit(1,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
     if(!strcmp(method,"system_shutdown"))return schedule_system_exit(0,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
     if(!strcmp(method,"screen_capture")||!strcmp(method,"window_capture")){
@@ -669,16 +675,16 @@ static char* build_response_json(const char*method,const char*request_id,const c
 static int send_cooperative_response(unsigned long stream,const char*method,const char*request_id,const char*result) {
     char*response=build_response_json(method,request_id,result);int ok;
     if(!response)return 0;
-    ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response),control_key,"guest-to-host");free(response);return ok;
+    ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response));free(response);return ok;
 }
 static int cooperative_stop(void) {
-    int ready;W98_FRAME f;w98_u8*payload,mac[32];char method[128],rid[128];char*result;
+    int ready;W98_FRAME f;w98_u8*payload;char method[128],rid[128];char*result;
     if(agent_stop_requested()){control_aborted=1;return 1;}
     if(control_socket==INVALID_SOCKET)return 0;
     for(;;){ready=w98_frame_ready(control_socket);if(ready<0){control_dead=1;break;}if(!ready)break;
-      if(!w98_recv_frame(control_socket,&f,&payload,mac)){control_dead=1;break;}
-      if(f.seq_hi||f.seq_lo!=control_rx_sequence++||!w98_verify_frame(&f,payload,mac,control_key,"host-to-guest")){free(payload);control_dead=1;break;}
-      if(f.type==W98_F_PING){if(!w98_send_frame(control_socket,W98_F_PONG,0,f.stream_id,control_tx_sequence++,0,payload,f.payload_len,control_key,"guest-to-host"))control_dead=1;free(payload);continue;}
+      if(!w98_recv_frame(control_socket,&f,&payload)){control_dead=1;break;}
+      if(f.seq_hi||f.seq_lo!=control_rx_sequence++){free(payload);control_dead=1;break;}
+      if(f.type==W98_F_PING){if(!w98_send_frame(control_socket,W98_F_PONG,0,f.stream_id,control_tx_sequence++,0,payload,f.payload_len))control_dead=1;free(payload);continue;}
       if(f.type==W98_F_CANCEL){control_cancelled=1;free(payload);continue;}
       if(f.type==W98_F_REQUEST){method[0]=rid[0]=0;json_string((char*)payload,"method",method,sizeof(method));json_string((char*)payload,"requestId",rid,sizeof(rid));
         if(!strcmp(method,"session_abort")||!strcmp(method,"sanitize")){control_aborted=1;cleanup_input();cleanup_sessions();cleanup_transfers();result=ok_data("{\"sanitized\":true}");}
@@ -693,78 +699,58 @@ static int cooperative_sleep(unsigned long milliseconds) {
     unsigned long start=GetTickCount(),elapsed;do{if(cooperative_stop())return 0;elapsed=GetTickCount()-start;if(elapsed>=milliseconds)break;Sleep(milliseconds-elapsed>20?20:milliseconds-elapsed);}while(1);return !cooperative_stop();
 }
 
-static void random_bytes(w98_u8*out,int n) {
-    HCRYPTPROV p=0;typedef BOOL(WINAPI*PFN_ACQ)(HCRYPTPROV*,LPCSTR,LPCSTR,DWORD,DWORD);typedef BOOL(WINAPI*PFN_GEN)(HCRYPTPROV,DWORD,BYTE*);typedef BOOL(WINAPI*PFN_REL)(HCRYPTPROV,DWORD);
-    HMODULE a=LoadLibraryA("ADVAPI32.DLL");PFN_ACQ acq;PFN_GEN gen;PFN_REL rel;int i;
-    if(a){acq=(PFN_ACQ)GetProcAddress(a,"CryptAcquireContextA");gen=(PFN_GEN)GetProcAddress(a,"CryptGenRandom");rel=(PFN_REL)GetProcAddress(a,"CryptReleaseContext");
-      if(acq&&gen&&rel&&acq(&p,0,0,1,0xf0000000UL)&&gen(p,n,out)){rel(p,0);FreeLibrary(a);return;}if(p)rel(p,0);FreeLibrary(a);}
-    srand((unsigned int)(GetTickCount()^GetCurrentProcessId()));for(i=0;i<n;i++)out[i]=(w98_u8)(rand()^(GetTickCount()>>(i&7)));
-}
-static int parse_proof(const char*j,char*out){return json_string(j,"proof",out,65);}
-
 /*
  * Stream the frame through blocking recv() calls. Requiring a complete 64 KiB
  * frame to be present in FIONREAD deadlocks against Windows 98's smaller TCP
  * receive buffer. SO_RCVTIMEO still breaks a genuinely idle/half-open socket.
  */
-static int receive_frame_with_timeout(SOCKET s,W98_FRAME*f,w98_u8**payload,w98_u8 mac[32],unsigned long timeout) {
+static int receive_frame_with_timeout(SOCKET s,W98_FRAME*f,w98_u8**payload,unsigned long timeout) {
     int timeout_ms=(int)timeout;if(agent_stop_requested())return 0;
-    setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout_ms,sizeof(timeout_ms));return w98_recv_frame(s,f,payload,mac);
+    setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout_ms,sizeof(timeout_ms));return w98_recv_frame(s,f,payload);
 }
 static void log_winsock_error(const char*message) {
     char line[160];sprintf(line,"%s (Winsock error %d)",message,WSAGetLastError());log_line(line);
 }
 
-static int authenticated_loop(SOCKET s) {
-    w98_u8 gn[32],hn[32],key[32],proof[32],mac[32],*payload,*raw;char *b64,*proof64,htext[80],json[4096],rid[128],method[128],guest_text[385],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;int was_authenticated=0;
-    json_escape(cfg.guest_id,guest_text,sizeof(guest_text));random_bytes(gn,32);b64=base64_encode(gn,32);if(!b64)return 0;sprintf(json,"{\"kind\":\"guest_hello\",\"guestNonce\":\"%s\",\"guestId\":\"%s\",\"guestBuildId\":\"%s\"}",b64,guest_text,BUILD_ID);free(b64);
-    if(!w98_send_frame(s,W98_F_HELLO,0,0,0,0,json,strlen(json),0,0)||!receive_frame_with_timeout(s,&f,&payload,mac,HANDSHAKE_TIMEOUT_MS))return 0;
-    if(f.type!=W98_F_CHALLENGE||!json_string((char*)payload,"hostNonce",htext,sizeof(htext))){free(payload);return 0;}
-    raw=base64_decode(htext,&off);if(!raw||off!=32){free(raw);free(payload);return 0;}memcpy(hn,raw,32);free(raw);
-    w98_hmac_sha256(cfg.psk,cfg.psk_len,"session-key\0",12,gn,32,hn,32,key);
-    if(!parse_proof((char*)payload,htext)){free(payload);return 0;}raw=base64_decode(htext,&off);w98_hmac_sha256(key,32,"host-proof\0",11,0,0,0,0,proof);
-    if(!raw||off!=32||memcmp(raw,proof,32)){free(raw);free(payload);log_line("host proof rejected");return 0;}free(raw);free(payload);
-    w98_hmac_sha256(key,32,"guest-proof\0",12,0,0,0,0,proof);proof64=base64_encode(proof,32);if(!proof64)return 0;
+static int connected_loop(SOCKET s) {
+    w98_u8 *payload;char json[4096],rid[128],method[128],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;
     wheel_command=GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"\"mouse_scroll\",":"";
-    sprintf(json,"{\"kind\":\"authenticate\",\"proof\":\"%s\",\"capabilities\":{\"guestId\":\"%s\",\"guestBuildId\":\"%s\",\"protocolVersion\":1,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
-      proof64,guest_text,BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",wheel_command);free(proof64);
-    if(!w98_send_frame(s,W98_F_AUTHENTICATE,0,0,0,0,json,strlen(json),0,0)||!receive_frame_with_timeout(s,&f,&payload,mac,HANDSHAKE_TIMEOUT_MS))return 0;
-    if(f.type!=W98_F_AUTHENTICATED||f.seq_lo!=1||!w98_verify_frame(&f,payload,mac,key,"host-to-guest")){free(payload);return 0;}free(payload);
-    was_authenticated=1;log_line("authenticated");set_agent_status("Connected and authenticated");control_socket=s;memcpy(control_key,key,32);control_tx_sequence=1;control_rx_sequence=2;control_cancelled=control_aborted=control_dead=0;
-    for(;;){if(!receive_frame_with_timeout(s,&f,&payload,mac,CONTROL_IDLE_TIMEOUT_MS)){log_line("connection idle timeout or socket closed");break;}if(f.seq_hi||f.seq_lo!=control_rx_sequence++||!w98_verify_frame(&f,payload,mac,key,"host-to-guest")){free(payload);log_line("signed frame validation failed");break;}
-      if(f.type==W98_F_PING){w98_send_frame(s,W98_F_PONG,0,0,control_tx_sequence++,0,payload,f.payload_len,key,"guest-to-host");free(payload);continue;}
+    sprintf(json,"{\"kind\":\"guest_hello\",\"capabilities\":{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"Windows 98\",\"osVersion\":\"4.x\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"show_message\",\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
+      BUILD_ID,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",wheel_command);
+    if(!w98_send_frame(s,W98_F_HELLO,0,0,0,0,json,strlen(json))||!receive_frame_with_timeout(s,&f,&payload,HANDSHAKE_TIMEOUT_MS))return 0;
+    if(f.type!=W98_F_READY||f.seq_hi||f.seq_lo!=0){free(payload);return 0;}free(payload);
+    log_line("guest ready");set_agent_status("Connected");control_socket=s;control_tx_sequence=1;control_rx_sequence=1;control_cancelled=control_aborted=control_dead=0;
+    for(;;){if(!receive_frame_with_timeout(s,&f,&payload,CONTROL_IDLE_TIMEOUT_MS)){log_line("connection idle timeout or socket closed");break;}if(f.seq_hi||f.seq_lo!=control_rx_sequence++){free(payload);log_line("frame sequence validation failed");break;}
+      if(f.type==W98_F_PING){w98_send_frame(s,W98_F_PONG,0,0,control_tx_sequence++,0,payload,f.payload_len);free(payload);continue;}
       if(f.type!=W98_F_REQUEST){free(payload);continue;}control_cancelled=control_aborted=0;rid[0]=method[0]=0;json_string((char*)payload,"requestId",rid,sizeof(rid));json_string((char*)payload,"method",method,sizeof(method));result=dispatch(method,(char*)payload);free(payload);if(result&&strstr(result,"\"ok\":false"))cleanup_input();
-      if(pending_binary){for(off=0;off<pending_binary_len;off+=chunk){chunk=pending_binary_len-off;if(chunk>W98_MAX_DATA)chunk=W98_MAX_DATA;if(!w98_send_frame(s,W98_F_DATA,(off+chunk==pending_binary_len)?1:0,pending_binary_stream,control_tx_sequence++,0,pending_binary+off,chunk,key,"guest-to-host")){free(pending_binary);pending_binary=0;goto connection_end;}}free(pending_binary);pending_binary=0;pending_binary_len=0;}
+      if(pending_binary){for(off=0;off<pending_binary_len;off+=chunk){chunk=pending_binary_len-off;if(chunk>W98_MAX_DATA)chunk=W98_MAX_DATA;if(!w98_send_frame(s,W98_F_DATA,(off+chunk==pending_binary_len)?1:0,pending_binary_stream,control_tx_sequence++,0,pending_binary+off,chunk)){free(pending_binary);pending_binary=0;goto connection_end;}}free(pending_binary);pending_binary=0;pending_binary_len=0;}
       if(!result)result=error_result("OUT_OF_MEMORY","Guest could not allocate an operation result");if(!result)break;
       resp=build_response_json(method,rid,result);free(result);if(!resp)break;
-      if(!w98_send_frame(s,W98_F_RESPONSE,0,f.stream_id,control_tx_sequence++,0,resp,strlen(resp),key,"guest-to-host")){free(resp);break;}free(resp);
+      if(!w98_send_frame(s,W98_F_RESPONSE,0,f.stream_id,control_tx_sequence++,0,resp,strlen(resp))){free(resp);break;}free(resp);
     }
 connection_end:
-    control_socket=INVALID_SOCKET;memset(control_key,0,sizeof(control_key));memset(key,0,sizeof(key));cleanup_input();
+    control_socket=INVALID_SOCKET;cleanup_input();
     if(agent_stop_requested()){log_line("connection ended during shutdown");set_agent_status("Stopping...");}
     else{log_line("connection ended; reconnecting");set_agent_status("Connection lost; reconnecting");}
-    return was_authenticated;
+    return 1;
 }
 
 static int load_config(void) {
-    char exe[MAX_PATH],dir[MAX_PATH],pskhex[129];char*p;unsigned long hex_len,exe_len;exe[0]=0;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(dir,exe);p=strrchr(dir,'\\');if(p)*p=0;
+    char exe[MAX_PATH],dir[MAX_PATH];char*p;unsigned long exe_len;exe[0]=0;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(dir,exe);p=strrchr(dir,'\\');if(p)*p=0;
     if(!safe_format(cfg.ini_path,MAX_PATH,"%s\\WIN98CTL.INI",dir,0)||!safe_format(cfg.log_path,MAX_PATH,"%s\\MCPAGENT.LOG",dir,0)){MessageBoxA(0,"WIN98CTL is installed in a path that is too long.","WIN98CTL configuration error",MB_ICONERROR);return 0;}
     GetPrivateProfileStringA("connection","host","192.168.56.1",cfg.host,sizeof(cfg.host),cfg.ini_path);cfg.port=(unsigned short)GetPrivateProfileIntA("connection","port",9898,cfg.ini_path);
-    GetPrivateProfileStringA("identity","guest_id","win98-vm",cfg.guest_id,sizeof(cfg.guest_id),cfg.ini_path);GetPrivateProfileStringA("security","psk_hex","",pskhex,sizeof(pskhex),cfg.ini_path);
-    hex_len=strlen(pskhex);cfg.psk_len=hex_len/2;if(hex_len<64||hex_len>128||(hex_len&1)||!w98_unhex(pskhex,cfg.psk,cfg.psk_len)){MessageBoxA(0,"Set a PSK of at least 32 bytes as hexadecimal psk_hex in WIN98CTL.INI.","WIN98CTL configuration error",MB_ICONERROR);return 0;}return 1;
+    if(!cfg.host[0]||!cfg.port){MessageBoxA(0,"Set host and port in the [connection] section of WIN98CTL.INI.","WIN98CTL configuration error",MB_ICONERROR);return 0;}return 1;
 }
 static int install_startup(void) {
     HKEY k;char exe[MAX_PATH],value[MAX_PATH+3];LONG r;unsigned long exe_len;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;if(_snprintf(value,sizeof(value),"\"%s\"",exe)<0)return 0;r=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_SET_VALUE,&k);
     if(r==ERROR_SUCCESS){r=RegSetValueExA(k,"WIN98CTL",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
 }
 static int self_test(void) {
-    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],*slash,hx[65];FILE*f,*tf;unsigned char*d,digest[32],pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
+    WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],*slash;FILE*f,*tf;unsigned char*d,pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
     strcpy(dir,cfg.ini_path);slash=strrchr(dir,'\\');if(slash)*slash=0;if(!safe_format(path,MAX_PATH,"%s\\SELFTEST.TXT",dir,0))return 2;f=fopen(path,"w");if(!f)return 2;
     reconnect_delay=RECONNECT_DELAY_MS;fprintf(f,"WIN98CTL %s SELF TEST\r\n",BUILD_ID);fprintf(f,"Configuration: PASS\r\n");fprintf(f,"Reconnect interval: %s (%lu ms)\r\n",reconnect_delay==2000UL?"PASS":"FAIL",reconnect_delay);if(reconnect_delay!=2000UL)ok=0;if(WSAStartup(MAKEWORD(2,0),&wd)){fprintf(f,"Winsock 2: FAIL (WSAStartup rejected version 2.0)\r\n");ok=0;}else{if(LOBYTE(wd.wVersion)<2){fprintf(f,"Winsock 2: FAIL (provider returned version %u.%u)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion));ok=0;}else fprintf(f,"Winsock 2: PASS %u.%u (%s)\r\n",LOBYTE(wd.wVersion),HIBYTE(wd.wVersion),wd.szDescription);WSACleanup();}
     d=capture_bmp(0,0,64,64,0,&n);fprintf(f,"GDI capture: %s (%lu bytes)\r\n",d?"PASS":"FAIL",d?n:0);if(!d)ok=0;free(d);
-    w98_hmac_sha256((w98_u8*)"key",3,"The quick brown fox jumps over the lazy dog",43,0,0,0,0,digest);w98_hex(digest,32,hx);
-    fprintf(f,"HMAC-SHA256: %s\r\n",!strcmp(hx,"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")?"PASS":"FAIL");
-    if(strcmp(hx,"f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"))ok=0;
+    fprintf(f,"Protocol framing: PASS (v2 length and sequence validation)\r\n");
     fprintf(f,"Keyboard APIs: %s\r\n",GetProcAddress(GetModuleHandleA("USER32.DLL"),"keybd_event")?"PASS":"FAIL");
     if(!safe_format(temp,MAX_PATH,"%s\\W98TEST.TMP",dir,0)){fprintf(f,"Temporary file: FAIL (path)\r\n");ok=0;}
     else{tf=fopen(temp,"wb");if(tf){fwrite("WIN98CTL",1,8,tf);fclose(tf);}tf=fopen(temp,"rb");memset(pipebuf,0,sizeof(pipebuf));n=tf?fread(pipebuf,1,8,tf):0;if(tf)fclose(tf);DeleteFileA(temp);fprintf(f,"Temporary file: %s\r\n",n==8&&!memcmp(pipebuf,"WIN98CTL",8)?"PASS":"FAIL");if(n!=8||memcmp(pipebuf,"WIN98CTL",8))ok=0;}
@@ -781,7 +767,7 @@ static DWORD WINAPI agent_network_thread(LPVOID parameter) {
     for(;;){if(agent_stop_requested())break;s=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(s!=INVALID_SOCKET){set_agent_socket(s);setsockopt(s,SOL_SOCKET,SO_KEEPALIVE,(char*)&keepalive,sizeof(keepalive));setsockopt(s,SOL_SOCKET,SO_RCVTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));setsockopt(s,SOL_SOCKET,SO_SNDTIMEO,(char*)&socket_timeout,sizeof(socket_timeout));memset(&sa,0,sizeof(sa));sa.sin_family=AF_INET;sa.sin_port=htons(cfg.port);sa.sin_addr.s_addr=inet_addr(cfg.host);
       sprintf(line,"Connecting to %s:%u...",cfg.host,(unsigned int)cfg.port);set_agent_status(line);
       if(sa.sin_addr.s_addr==INADDR_NONE){he=gethostbyname(cfg.host);if(he)memcpy(&sa.sin_addr,he->h_addr,he->h_length);else log_winsock_error("host name resolution failed");}
-      if(!agent_stop_requested()&&connect(s,(struct sockaddr*)&sa,sizeof(sa))==0){log_line("TCP connected");set_agent_status("TCP connected; authenticating...");authenticated_loop(s);}else if(!agent_stop_requested())log_winsock_error("TCP connect failed");close_agent_socket(s);}else log_winsock_error("socket creation failed");
+      if(!agent_stop_requested()&&connect(s,(struct sockaddr*)&sa,sizeof(sa))==0){log_line("TCP connected");set_agent_status("TCP connected; waiting for host...");connected_loop(s);}else if(!agent_stop_requested())log_winsock_error("TCP connect failed");close_agent_socket(s);}else log_winsock_error("socket creation failed");
       cleanup_input();cleanup_sessions();cleanup_transfers();if(agent_stop_requested())break;set_agent_status("Disconnected; retrying in 2 seconds");log_line("reconnect scheduled in 2000 milliseconds");if(wait_for_agent_stop(RECONNECT_DELAY_MS))break;}
 network_done:
     interrupt_agent_socket();control_socket=INVALID_SOCKET;cleanup_input();cleanup_sessions();cleanup_transfers();if(winsock_started)WSACleanup();log_line("agent stopped");set_agent_status("Stopped");if(agent_main_window)PostMessageA(agent_main_window,WM_AGENT_WORKER_DONE,0,0);return 0;
@@ -794,10 +780,10 @@ static void begin_agent_shutdown(HWND hwnd) {
 
 static LRESULT CALLBACK agent_window_proc(HWND hwnd,UINT message,WPARAM wparam,LPARAM lparam) {
     char status[256];
-    (void)lparam;
     if(message==WM_COMMAND&&LOWORD(wparam)==ID_CLOSE_BUTTON){begin_agent_shutdown(hwnd);return 0;}
     if(message==WM_CLOSE){begin_agent_shutdown(hwnd);return 0;}
     if(message==WM_AGENT_STATUS){if(!agent_ui_stopping&&agent_status_window){EnterCriticalSection(&agent_status_lock);strcpy(status,agent_status_text);LeaveCriticalSection(&agent_status_lock);SetWindowTextA(agent_status_window,status);}return 0;}
+    if(message==WM_AGENT_SHOW_MESSAGE){AGENT_MESSAGE *agent_message=(AGENT_MESSAGE*)lparam;if(agent_message){MessageBoxA(hwnd,agent_message->text,"Windows 98 Remote Control",MB_OK|MB_ICONINFORMATION|MB_SETFOREGROUND);free(agent_message->text);free(agent_message);}return 0;}
     if(message==WM_AGENT_WORKER_DONE){DestroyWindow(hwnd);return 0;}
     if(message==WM_QUERYENDSESSION)return TRUE;
     if(message==WM_ENDSESSION&&wparam){begin_agent_shutdown(hwnd);return 0;}

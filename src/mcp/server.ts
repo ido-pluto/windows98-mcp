@@ -208,6 +208,15 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     annotations: { ...mutating, idempotentHint: true }
   },
   {
+    name: "show_message",
+    description:
+      "Display a Windows 98 message dialog titled Windows 98 Remote Control. Acquires the VM lease.",
+    inputSchema: z.strictObject({
+      message: z.string().min(1).max(8_192)
+    }),
+    annotations: mutating
+  },
+  {
     name: "screen_capture",
     description:
       "Capture the primary display or a pixel region as native MCP PNG image content. Acquires the VM lease.",

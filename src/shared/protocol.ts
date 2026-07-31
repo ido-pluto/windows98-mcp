@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import {
   FRAME_HEADER_BYTES,
   FRAME_MAC_BYTES,
@@ -50,24 +50,9 @@ export function decodeHeader(buffer: Buffer): FrameHeader {
   return header;
 }
 
-export function frameMac(
-  key: Buffer,
-  direction: "host-to-guest" | "guest-to-host",
-  header: Buffer,
-  payload: Buffer
-): Buffer {
-  return createHmac("sha256", key)
-    .update(direction, "ascii")
-    .update(header)
-    .update(payload)
-    .digest();
-}
-
 export function encodeFrame(
   header: Omit<FrameHeader, "version" | "payloadLength">,
-  payload: Buffer,
-  key?: Buffer,
-  direction: "host-to-guest" | "guest-to-host" = "host-to-guest"
+  payload: Buffer
 ): Buffer {
   const fullHeader: FrameHeader = {
     ...header,
@@ -75,10 +60,7 @@ export function encodeFrame(
     payloadLength: payload.length
   };
   const encodedHeader = encodeHeader(fullHeader);
-  const mac = key
-    ? frameMac(key, direction, encodedHeader, payload)
-    : Buffer.alloc(FRAME_MAC_BYTES);
-  return Buffer.concat([encodedHeader, payload, mac]);
+  return Buffer.concat([encodedHeader, payload]);
 }
 
 export class FrameDecoder {
@@ -104,12 +86,7 @@ export class FrameDecoder {
             FRAME_HEADER_BYTES + header.payloadLength
           )
         ),
-        mac: Buffer.from(
-          this.pending.subarray(
-            FRAME_HEADER_BYTES + header.payloadLength,
-            frameLength
-          )
-        )
+        mac: Buffer.alloc(0)
       });
       this.pending = this.pending.subarray(frameLength);
     }
@@ -121,15 +98,6 @@ export class FrameDecoder {
   }
 }
 
-export function verifyFrameMac(
-  frame: DecodedFrame,
-  key: Buffer,
-  direction: "host-to-guest" | "guest-to-host"
-): boolean {
-  const header = encodeHeader(frame.header);
-  const expected = frameMac(key, direction, header, frame.payload);
-  return timingSafeEqual(expected, frame.mac);
-}
 
 export function encodeJson(value: unknown): Buffer {
   return Buffer.from(JSON.stringify(value), "utf8");

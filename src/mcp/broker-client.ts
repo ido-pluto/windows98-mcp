@@ -16,7 +16,6 @@ const DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
 
 export interface BrokerClientOptions {
   pipePath?: string;
-  localToken?: string;
   sessionId?: string;
   sessionLabel?: string;
   connectTimeoutMs?: number;
@@ -55,7 +54,6 @@ export class BrokerClient {
   readonly pipePath: string;
   readonly sessionId: string;
   readonly sessionLabel: string;
-  readonly localToken: string;
 
   private readonly connectTimeoutMs: number;
   private readonly requestTimeoutMs: number;
@@ -81,10 +79,6 @@ export class BrokerClient {
         process.env["WIN98_MCP_SESSION_LABEL"] ??
         defaultSessionLabel()
       ).slice(0, 128);
-    this.localToken =
-      options.localToken ??
-      process.env["WIN98_MCP_LOCAL_TOKEN"] ??
-      "";
     this.connectTimeoutMs =
       options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
     this.requestTimeoutMs =
@@ -241,7 +235,6 @@ export class BrokerClient {
           kind: "broker_hello",
           sessionId: this.sessionId,
           sessionLabel: this.sessionLabel,
-          localAuth: this.localToken
         };
         socket.write(`${JSON.stringify(hello)}\n`, "utf8", (error) => {
           if (error) {

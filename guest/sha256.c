@@ -56,12 +56,3 @@ void w98_sha256_final(W98_SHA256_CTX *c,w98_u8 out[32]) {
     w98_sha256_update(c,pad,pad_n);w98_sha256_update(c,len,8);
     for(i=0;i<8;i++)put32(out+i*4,c->state[i]);memset(c,0,sizeof(*c));
 }
-void w98_hmac_sha256(const w98_u8 *key,unsigned long kn,const void *a,unsigned long an,
- const void *b,unsigned long bn,const void *d,unsigned long dn,w98_u8 out[32]) {
-    w98_u8 kb[64],inner[32];W98_SHA256_CTX c;unsigned long i;
-    memset(kb,0,64);if(kn>64){w98_sha256_init(&c);w98_sha256_update(&c,key,kn);w98_sha256_final(&c,kb);}else memcpy(kb,key,kn);
-    for(i=0;i<64;i++)kb[i]^=0x36;w98_sha256_init(&c);w98_sha256_update(&c,kb,64);
-    if(an)w98_sha256_update(&c,a,an);if(bn)w98_sha256_update(&c,b,bn);if(dn)w98_sha256_update(&c,d,dn);w98_sha256_final(&c,inner);
-    for(i=0;i<64;i++)kb[i]^=0x36^0x5c;w98_sha256_init(&c);w98_sha256_update(&c,kb,64);w98_sha256_update(&c,inner,32);w98_sha256_final(&c,out);
-    memset(kb,0,64);memset(inner,0,32);
-}

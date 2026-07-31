@@ -6,52 +6,16 @@ describe("CLI options", () => {
     expect(parseCliArgs([])).toMatchObject({ command: "stdio" });
   });
 
-  it("maps --ip to an expected guest source IP", () => {
-    expect(parseCliArgs(["--ip", "192.168.60.128"])).toMatchObject({
-      command: "stdio",
-      overrides: { expectedGuestIp: "192.168.60.128" },
-      configArgs: ["--ip", "192.168.60.128"]
-    });
-  });
-
-  it("accepts network options after a command", () => {
-    expect(
-      parseCliArgs([
-        "doctor",
-        "--bind=192.168.60.1",
-        "--port",
-        "9898",
-        "--host-root",
-        "C:\\MCP"
-      ])
-    ).toMatchObject({
+  it("accepts a port override after a command", () => {
+    expect(parseCliArgs(["doctor", "--port", "9899"])).toMatchObject({
       command: "doctor",
-      overrides: {
-        bindHost: "192.168.60.1",
-        guestPort: 9898,
-        hostAllowedRoots: ["C:\\MCP"]
-      }
+      overrides: { guestPort: 9899 },
+      configArgs: ["--port", "9899"]
     });
   });
 
-  it("preserves configure-specific guest directory arguments", () => {
-    expect(
-      parseCliArgs([
-        "configure",
-        "--bind",
-        "192.168.60.1",
-        "--ip",
-        "192.168.60.128",
-        "--guest-dir",
-        "C:\\WIN98CTL"
-      ])
-    ).toMatchObject({
-      command: "configure",
-      overrides: {
-        bindHost: "192.168.60.1",
-        expectedGuestIp: "192.168.60.128"
-      },
-      commandArgs: ["--guest-dir", "C:\\WIN98CTL"]
-    });
+  it("rejects removed guest filtering/configuration options", () => {
+    expect(() => parseCliArgs(["--ip", "192.168.60.128"])).toThrow("CLI_UNKNOWN_OPTION:--ip");
+    expect(() => parseCliArgs(["configure"])).toThrow("UNKNOWN_COMMAND:configure");
   });
 });

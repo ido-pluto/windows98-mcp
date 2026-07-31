@@ -1,7 +1,8 @@
 export const PROTOCOL_MAGIC = "W98M";
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const FRAME_HEADER_BYTES = 28;
-export const FRAME_MAC_BYTES = 32;
+/** Protocol v2 has no authentication trailer. CRC/SHA-256 remain in transfer payloads. */
+export const FRAME_MAC_BYTES = 0;
 export const MAX_CONTROL_PAYLOAD = 1024 * 1024;
 export const MAX_DATA_PAYLOAD = 64 * 1024;
 export const DEFAULT_LEASE_TTL_MS = 30 * 60 * 1000;
@@ -11,9 +12,7 @@ export const UNLOCK_REMINDER =
 
 export enum FrameType {
   Hello = 1,
-  Challenge = 2,
-  Authenticate = 3,
-  Authenticated = 4,
+  Ready = 2,
   Request = 10,
   Response = 11,
   Event = 12,
@@ -59,7 +58,7 @@ export interface GuestCapabilities {
 
 export type ConnectionState =
   | "offline"
-  | "authenticating"
+  | "connecting"
   | "online"
   | "sanitizing";
 
@@ -117,7 +116,6 @@ export interface BrokerHello {
   kind: "broker_hello";
   sessionId: string;
   sessionLabel: string;
-  localAuth: string;
 }
 
 export interface GuestRequest {

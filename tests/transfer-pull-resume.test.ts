@@ -28,7 +28,6 @@ describe("guest-to-host transfer resume", () => {
     let failOnce = true;
 
     const coordinator = new TransferCoordinator(
-      [root],
       async (_sessionId, method, params): Promise<GuestResponse> => {
         if (method !== "file_read_chunk") {
           throw new Error(`UNEXPECTED_METHOD:${method}`);
@@ -92,7 +91,6 @@ describe("guest-to-host transfer resume", () => {
     const guestBytes = Buffer.alloc(70_000, 0x5a);
     let calls = 0;
     const coordinator = new TransferCoordinator(
-      [root],
       async (_sessionId, method, params): Promise<GuestResponse> => {
         if (method !== "file_read_chunk") {
           throw new Error(`UNEXPECTED_METHOD:${method}`);

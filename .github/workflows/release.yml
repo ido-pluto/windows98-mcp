@@ -41,6 +41,12 @@ jobs:
       - name: Stage Windows 98 release asset
         shell: powershell
         run: ./scripts/stage-release.ps1
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci --prefix admin
+      - run: npm --prefix admin run build
+      - name: Stage portable Windows x64 admin release asset
+        shell: powershell
+        run: ./scripts/stage-admin-release.ps1
       - name: Publish npm package and GitHub release
         run: npm run release
         env:

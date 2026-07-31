@@ -3,26 +3,13 @@ WIN98CTL - RELEASE DOWNLOAD
 
 This is the Windows 98 guest component for windows98-mcp.
 
-1. Extract this release folder on the host. Install Node.js 22.17 or newer
-   and run this command from the workspace the MCP may access:
+1. Extract this folder and edit WIN98CTL.INI. Set host to the host-only adapter
+   address visible from Windows 98 and set port to the host listener port.
+2. Copy the complete folder to Windows 98.
+3. Run RUNTEST.BAT, then WIN98CTL.EXE.
+4. On the host, start the Windows admin app or run npx windows98-mcp.
+5. Run INSTALL.BAT only after the host smoke test passes.
 
-   npx windows98-mcp configure --bind HOST_ONLY_IP --ip GUEST_IP --guest-dir PATH_TO_THIS_FOLDER
-
-2. That command writes WIN98CTL.INI into this folder and a matching
-   .win98-mcp\config.json into the current host workspace. Copy this complete
-   configured folder to Windows 98.
-3. In Windows 98, run RUNTEST.BAT, then WIN98CTL.EXE.
-4. On the host, run npx windows98-mcp doctor followed by smoke-test.
-5. Run INSTALL.BAT only after the smoke test passes.
-
-The host-only IP is the host address visible from the VM, not a public/NAT
-address. The guest address is used by the broker to reject other source IPs.
-
-SECURITY
---------
-Traffic is authenticated and integrity-protected but is not encrypted. Keep
-the broker on an isolated VM host-only network. Never publish a generated
-WIN98CTL.INI because it contains the plaintext PSK.
-
-WIN98CTL.INI.example documents the file format only. The configure command
-creates the real configuration safely and keeps it out of Git and npm.
+The Windows 98 guest always connects outbound to the host. It retries every
+two seconds. Protocol v2 has no secrets, authentication, or encryption; use it
+only on an isolated VM network.

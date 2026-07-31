@@ -13,7 +13,7 @@ export {
 export {
   configDirectory,
   defaultPipePath,
-  deriveLocalAdapterToken,
+  runtimeSettingsPath,
   loadBrokerConfig,
   publicConfig,
   type BrokerConfig,

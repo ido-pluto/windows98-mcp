@@ -19,7 +19,7 @@ if (Test-Path -LiteralPath $bundle) {
 New-Item -ItemType Directory -Force -Path $bundle | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $bundle "WIN98CTL.EXE")
-Copy-Item -LiteralPath (Join-Path $repo "guest\WIN98CTL.INI.example") -Destination (Join-Path $bundle "WIN98CTL.INI.example")
+Copy-Item -LiteralPath (Join-Path $repo "guest\WIN98CTL.INI") -Destination (Join-Path $bundle "WIN98CTL.INI")
 Copy-Item -LiteralPath (Join-Path $repo "guest\RUNTEST.BAT") -Destination (Join-Path $bundle "RUNTEST.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\INSTALL.BAT") -Destination (Join-Path $bundle "INSTALL.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\RELEASE.TXT") -Destination (Join-Path $bundle "README.TXT")
@@ -43,4 +43,4 @@ $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLow
     Set-Content -LiteralPath (Join-Path $output "windows98-mcp-guest.zip.sha256") -Encoding ASCII
 
 Write-Host "Release guest bundle staged at $archive"
-Write-Host "This bundle contains no PSK."
+Write-Host "Edit WIN98CTL.INI directly before copying this unauthenticated guest package to an isolated VM network."
