@@ -61,7 +61,14 @@ fn start_sidecar(app: &AppHandle, state: &AppState, port: u16) -> Result<(), Str
     Ok(())
 }
 fn stop_sidecar(state: &AppState) -> Result<(), String> {
-    if let Some(mut child) = state.child.lock().map_err(|_| "Broker process state lock failed")?.take() { child.kill().map_err(|e| format!("Could not stop broker: {e}"))?; }
+    if let Some(mut child) = state.child.lock().map_err(|_| "Broker process state lock failed")?.take() {
+        match child.kill() {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {}
+            Err(error) => return Err(format!("Could not stop broker: {error}"))
+        }
+        child.wait().map_err(|error| format!("Could not wait for broker shutdown: {error}"))?;
+    }
     *state.client.lock().map_err(|_| "Broker pipe state lock failed")? = None;
     Ok(())
 }
@@ -113,7 +120,16 @@ fn broker_call(state: &AppState, method: String, params: Value) -> Reply {
 #[tauri::command] fn get_port() -> u16 { read_settings().port }
 #[tauri::command] fn save_port(port: u16) -> Result<(), String> { if port == 0 { return Err("Port must be between 1 and 65535".into()); } write_settings(port) }
 #[tauri::command] fn start_broker(app: AppHandle, state: State<AppState>, port: u16) -> Result<(), String> { start_sidecar(&app, &state, port) }
-#[tauri::command] fn restart_broker(app: AppHandle, state: State<AppState>, port: u16) -> Result<(), String> { stop_sidecar(&state)?; start_sidecar(&app, &state, port) }
+#[tauri::command] fn restart_broker(app: AppHandle, state: State<AppState>, port: u16) -> Result<(), String> {
+    let active_port = *state.active_port.lock().map_err(|_| "Broker port state lock failed")?;
+    // A broker started by another MCP/admin process is already the correct
+    // singleton for this port. Do not race its pipe by attempting to replace it.
+    if active_port == port && state.child.lock().map_err(|_| "Broker process state lock failed")?.is_none() && pipe_exists(port) {
+        return Ok(());
+    }
+    stop_sidecar(&state)?;
+    start_sidecar(&app, &state, port)
+}
 #[tauri::command] fn broker_request(state: State<AppState>, method: String, params: Value) -> Reply { broker_call(&state, method, params) }
 #[tauri::command] fn wait_for_guest(state: State<AppState>) -> Result<Value, String> { let started = Instant::now(); loop { let reply = broker_call(&state, "vm_status".into(), json!({})); if reply.ok { if let Some(result) = reply.result { if result.pointer("/data/connection/state").and_then(Value::as_str) == Some("online") { return Ok(result.get("data").cloned().unwrap_or(result)); } } } if started.elapsed() >= Duration::from_secs(5) { return Err("GUEST_CONNECT_TIMEOUT: the guest did not connect within 5 seconds".into()); } std::thread::sleep(Duration::from_millis(250)); } }
 #[tauri::command] fn save_base64_png(path: String, data_url: String) -> Result<(), String> { let encoded = data_url.split_once(',').map(|(_, value)| value).ok_or("Invalid PNG data URL")?; let bytes = STANDARD.decode(encoded).map_err(|e| e.to_string())?; fs::write(Path::new(&path), bytes).map_err(|e| e.to_string()) }

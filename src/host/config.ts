@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { DEFAULT_LEASE_TTL_MS, DEFAULT_WAIT_TICKET_TTL_MS } from "../shared/types.js";
 
@@ -49,7 +49,9 @@ export function defaultPipePath(port = DEFAULT_PORT): string {
   if (process.platform === "win32") {
     return `\\\\.\\pipe\\win98-mcp${suffix}`;
   }
-  return resolve(tmpdir(), `win98-mcp${suffix}.sock`);
+  // Keep this independent of TMPDIR: the macOS Tauri client uses the same
+  // public /tmp endpoint, while Node's os.tmpdir() is often per-user.
+  return resolve("/tmp", `win98-mcp${suffix}.sock`);
 }
 
 export async function loadBrokerConfig(
