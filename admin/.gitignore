@@ -6,6 +6,8 @@ src-tauri/target/
 # native release runner. Other generated or local icon variants stay ignored.
 src-tauri/icons/*
 !src-tauri/icons/icon.png
+!src-tauri/icons/icon.ico
+!src-tauri/icons/icon.icns
 src-tauri/gen/
 src-tauri/resources/broker-sidecar/windows98-mcp-broker.exe
 src-tauri/resources/broker-sidecar/windows98-mcp-broker
