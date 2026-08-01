@@ -7,11 +7,14 @@ This is the Windows 98 through Windows 10 guest component for windows98-mcp.
    address visible from the controlled Windows machine and set port to the host
    listener port.
 2. Copy the complete folder to Windows 98 SE or Windows 10.
-3. Run RUNTEST.BAT, then WIN98CTL.EXE.
+3. Run RUNTEST.BAT, then WIN98SUP.EXE.
 4. On the host, start the Windows admin app or run npx windows98-mcp.
 5. Run INSTALL.BAT only after the host smoke test passes.
+6. Run UNINSTALL.BAT to stop the programs and remove current-user autostart.
 
 The same 32-bit WIN98CTL.EXE runs on Windows 98 SE and Windows 10 (32-bit or
-x64 through WOW64). The guest always connects outbound to the host and retries
-every two seconds. Protocol v2 has no secrets, authentication, or encryption;
-use it only on an isolated VM network.
+x64 through WOW64). WIN98SUP.EXE is the login supervisor: it restarts the
+agent after unexpected exits and closes only confirmed agent fault dialogs.
+The guest always connects outbound to the host and retries every two seconds.
+Protocol v2 has no secrets, authentication, or encryption; use it only on an
+isolated VM network.

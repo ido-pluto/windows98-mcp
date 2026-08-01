@@ -1,0 +1,10 @@
+system win95
+option quiet
+option eliminate
+option map=dist\WIN98SUP.map
+option stack=32768
+name dist\WIN98SUP.EXE
+file build\win98sup.obj
+library kernel32.lib
+library user32.lib
+library advapi32.lib

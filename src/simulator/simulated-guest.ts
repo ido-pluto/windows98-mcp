@@ -272,7 +272,8 @@ export class SimulatedGuest extends EventEmitter {
         "filesystem",
         "fs_drives",
         "system",
-        "show_message"
+        "show_message",
+        "agent_diagnostics"
       ]
     };
   }
@@ -320,6 +321,15 @@ export class SimulatedGuest extends EventEmitter {
       }
       this.inputEvents.push({ method, message });
       return { accepted: true };
+    }
+    if (method === "agent_diagnostics") {
+      return {
+        agentLogPath: "MCPAGENT.LOG",
+        crashLogPath: "MCPCRASH.LOG",
+        supervisorLogPath: "MCPSUPERVISOR.LOG",
+        supervisorState: "state=WIN98CTL running\r\nrestarts=1\r\n",
+        lastCrash: ""
+      };
     }
     if (method === "screen_capture" || method === "window_capture") {
       return this.captureScreen();

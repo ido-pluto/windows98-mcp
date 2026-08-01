@@ -100,7 +100,8 @@ const SAFE_RETRY_METHODS = new Set([
   "process_wait",
   "fs_stat",
   "fs_list",
-  "system_info"
+  "system_info",
+  "agent_diagnostics"
 ]);
 const NON_LOCKING_METHODS = new Set([
   "vm_status",
@@ -114,6 +115,8 @@ const NON_LOCKING_METHODS = new Set([
   "broker_disconnect_session",
   "broker_set_locking"
 ]);
+/** Guest-backed inspection that remains available while another session owns input. */
+const NON_LEASE_GUEST_METHODS = new Set(["agent_diagnostics"]);
 
 export class Broker {
   readonly lease: LeaseManager;
@@ -340,7 +343,7 @@ export class Broker {
       );
     }
 
-    if (this.config.lockingEnabled) {
+    if (this.config.lockingEnabled && !NON_LEASE_GUEST_METHODS.has(method)) {
       const acquisition = this.lease.acquire(sessionId, sessionLabel, true);
       if (!acquisition.acquired) {
         return this.brokerResponse(

@@ -36,6 +36,12 @@ describe("MCP tool surface", () => {
     expect(schema.safeParse({ message: "" }).success).toBe(false);
   });
 
+  it("exposes non-locking crash and supervisor diagnostics", () => {
+    const diagnostics = requireTool("agent_diagnostics");
+    expect(diagnostics.annotations?.readOnlyHint).toBe(true);
+    expect(diagnostics.inputSchema.safeParse({}).success).toBe(true);
+  });
+
   it("front-loads lease cleanup instructions", () => {
     expect(MCP_SERVER_INSTRUCTIONS.slice(0, 512)).toMatch(/vm_unlock/u);
     expect(MCP_SERVER_INSTRUCTIONS).toMatch(/disconnect/iu);

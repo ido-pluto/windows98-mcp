@@ -8,7 +8,7 @@ export interface BrokerConfig {
   guestPort: number;
   /** TCP port for admin/MCP adapters, including adapters on another machine. */
   adapterPort: number;
-  /** Whether the broker serializes VM-affecting calls into one lease owner. */
+  /** Whether the broker requires one lease owner; false uses the FIFO guest queue. */
   lockingEnabled: boolean;
   /** When set, this broker transparently relays its guest connection upstream. */
   upstreamHost?: string;
@@ -98,7 +98,7 @@ export async function loadBrokerConfig(
     65535
   );
   const lockingEnabled = boolean(
-    options.overrides?.lockingEnabled ?? merged.lockingEnabled ?? runtime.lockingEnabled ?? true,
+    options.overrides?.lockingEnabled ?? merged.lockingEnabled ?? runtime.lockingEnabled ?? false,
     "lockingEnabled"
   );
   const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");

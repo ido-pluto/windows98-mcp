@@ -6,13 +6,19 @@ SETUP
 1. Edit WIN98CTL.INI. Set host to the host computer's address as visible from
    this VM and set the matching listener port (9898 by default).
 2. Copy this complete folder to the Windows 98 or Windows 10 machine to control.
-3. Run RUNTEST.BAT, then WIN98CTL.EXE.
+3. Run RUNTEST.BAT, then WIN98SUP.EXE. It starts WIN98CTL.EXE and restarts it
+   after an unexpected exit.
 4. Start the host broker or Windows admin app on the same port.
 5. Run the host smoke test. Run INSTALL.BAT only after it succeeds.
 
-The agent retries the outbound host connection every two seconds forever until
-you close its small status window. The same retry applies if Winsock 2 is not
-yet available.
+UNINSTALL
+---------
+Run UNINSTALL.BAT to stop the agent and supervisor and remove their current
+user startup entries. It deliberately keeps this folder and its logs.
+
+The agent retries the outbound host connection every two seconds forever. The
+supervisor retries an unexpectedly closed agent every two seconds forever. Use
+the supervisor window's Exit supervisor button for an intentional stop.
 
 IMPORTANT
 ---------
@@ -22,8 +28,12 @@ an untrusted or public network.
 
 FILES TO RETURN AFTER A FAILURE
 -------------------------------
-Copy SELFTEST.TXT and MCPAGENT.LOG back to the host. MCPAGENT.LOG is bounded to
-256 KiB; the prior generation is MCPAGENT.OLD.
+Copy SELFTEST.TXT, MCPAGENT.LOG, MCPCRASH.LOG and MCPSUPERVISOR.LOG back to the
+host. MCPAGENT.LOG is bounded to 256 KiB; the prior generation is MCPAGENT.OLD.
+MCPCRASH.LOG records the exception and last in-flight request when the agent
+faults. MCPSUPERVISOR.LOG records restart and confirmed fault-dialog cleanup.
+For a one-time recovery check only, run WIN98SUP.EXE --fault-test. It launches
+one intentionally crashing child, then returns to a normal supervised agent.
 
 OPERATION NOTES
 ---------------

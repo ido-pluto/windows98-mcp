@@ -51,6 +51,20 @@ describe("broker with deterministic guest", () => {
     });
   });
 
+  it("returns crash and supervisor diagnostics without acquiring the VM lease", async () => {
+    const harness = await createHarness();
+    const client = await createClient(harness, "diagnostics");
+    const reply = await client.call("agent_diagnostics");
+    expect(reply.result).toMatchObject({
+      ok: true,
+      data: {
+        crashLogPath: "MCPCRASH.LOG",
+        supervisorLogPath: "MCPSUPERVISOR.LOG"
+      },
+      lease: { held: false }
+    });
+  });
+
   it("connects, captures a screen, and enforces exclusive ownership", async () => {
     const harness = await createHarness();
     const owner = await createClient(harness, "owner");

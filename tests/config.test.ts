@@ -28,7 +28,7 @@ describe("broker configuration", () => {
     const config = await loadBrokerConfig({ cwd: root, env: { LOCALAPPDATA: root } });
     expect(config.guestPort).toBe(9898);
     expect(config.pipePath).toBe(defaultPipePath());
-    expect(config.lockingEnabled).toBe(true);
+    expect(config.lockingEnabled).toBe(false);
   });
 
   it("accepts an explicit advisory parallel-mode setting", async () => {

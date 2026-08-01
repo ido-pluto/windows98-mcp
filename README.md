@@ -26,8 +26,10 @@ Macs. Windows needs the [Microsoft Edge WebView2 Runtime](https://developer.micr
 Windows 10 (x86 or WOW64). It opens and maintains an
 outbound TCP connection to a singleton broker on the host. MCP clients and the
 Windows admin app both use the same broker through a local endpoint selected by
-port, so the exclusive lease prevents control collisions. The default port
-uses the shared endpoint; other ports are isolated broker instances.
+port. Parallel operation is the default: the broker accepts several agents and
+uses a FIFO queue to send one operation at a time to the single-threaded guest.
+The default port uses the shared endpoint; other ports are isolated broker
+instances.
 
 The transport intentionally has **no authentication or authorization**. Keep
 it only on an isolated disposable VM network. The framing, sequence numbers,
@@ -40,7 +42,10 @@ do not provide security.
 2. Edit `WIN98CTL.INI` directly. Set `host` to the host-only adapter IPv4
    address visible from Windows 98 and choose a TCP `port` (default `9898`).
 3. Copy the complete folder to `C:\WIN98CTL` on Windows 98 or Windows 10. Run `RUNTEST.BAT`,
-   then start `WIN98CTL.EXE` and leave its small status window open.
+   then start `WIN98SUP.EXE`. It owns `WIN98CTL.EXE`, restarts it after crashes,
+   and is the program installed to the current user's login Run key.
+   Run `UNINSTALL.BAT` from the guest folder to stop both processes and remove
+   their current-user startup registration; it leaves logs and files in place.
 4. Download and run the Windows admin app. Set the same port in its connection
    panel. It starts the broker and shows guest status.
 5. Configure Codex to run the published MCP:
@@ -136,21 +141,22 @@ The tool groups are:
 - Desktop: clipboard and window control.
 - Commands: one-shot shell execution and cursor-based interactive terminals.
 - Message: `show_message` displays a Windows 98 popup.
+- Recovery: `agent_diagnostics` reports the guest's persisted crash context and supervisor state.
 - System and files: processes, filesystem primitives, resumable file transfer,
   and merging directory transfer.
 
-The first VM-affecting tool atomically acquires the lease. Every operational
-result reminds callers to release it with `vm_unlock`. Inactive leases expire
-after 30 minutes; disconnect cleanup releases held keys, buttons, terminals,
-and transfers. The Admin app's **Connected agents** panel can disconnect a
-different MCP/admin session; if it owns the lease, the broker cleans it up and
-releases the VM automatically.
+Parallel operation is the default. Multiple agents may submit work, while the
+broker's FIFO guest queue serializes protocol requests. This is safe for
+independent shell, file, and inspection work, but it cannot make Windows have
+separate mice, keyboards, focus, clipboard, or screens: agents must coordinate
+interactive UI work themselves. `vm_unlock` always cleans up the calling
+session's terminals, transfers, and held input.
 
-The Admin app can turn off **Exclusive lock agents** for a broker. This is a
-broker-wide advisory parallel mode: two agents can send VM calls without
-waiting, but Windows has one real mouse and keyboard, so simultaneous input can
-collide. In that mode a disconnect closes only the disconnected agent's
-broker-tracked terminals and transfers; do not use it for coordinated input.
+Enable **Exclusive lock agents** in the Admin app only when one agent must own
+all VM work. In that opt-in mode, the first VM-affecting call acquires the
+lease; `VM_BUSY` responses include a FIFO ticket for `vm_wait`, and inactivity
+expires the lease after 30 minutes. Disconnect cleanup releases held keys,
+buttons, terminals, and transfers in either mode.
 
 ## Development
 

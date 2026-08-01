@@ -1,5 +1,5 @@
 @ECHO OFF
-ECHO This registers WIN98CTL for the current Windows user.
-WIN98CTL.EXE --install
-ECHO You can also start WIN98CTL.EXE manually for the first test.
+ECHO This registers WIN98SUP for the current Windows user.
+WIN98SUP.EXE --install
+ECHO WIN98SUP starts and recovers WIN98CTL automatically after login.
 PAUSE

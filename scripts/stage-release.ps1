@@ -11,6 +11,10 @@ $exe = Join-Path $repo "guest\dist\WIN98CTL.EXE"
 if (-not (Test-Path -LiteralPath $exe)) {
     throw "Missing $exe. Run scripts\build-guest.ps1 first."
 }
+$supervisorExe = Join-Path $repo "guest\dist\WIN98SUP.EXE"
+if (-not (Test-Path -LiteralPath $supervisorExe)) {
+    throw "Missing $supervisorExe. Run scripts\build-guest.ps1 first."
+}
 
 $bundle = Join-Path $output "windows98-mcp-guest"
 if (Test-Path -LiteralPath $bundle) {
@@ -19,9 +23,11 @@ if (Test-Path -LiteralPath $bundle) {
 New-Item -ItemType Directory -Force -Path $bundle | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $bundle "WIN98CTL.EXE")
+Copy-Item -LiteralPath $supervisorExe -Destination (Join-Path $bundle "WIN98SUP.EXE")
 Copy-Item -LiteralPath (Join-Path $repo "guest\WIN98CTL.INI") -Destination (Join-Path $bundle "WIN98CTL.INI")
 Copy-Item -LiteralPath (Join-Path $repo "guest\RUNTEST.BAT") -Destination (Join-Path $bundle "RUNTEST.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\INSTALL.BAT") -Destination (Join-Path $bundle "INSTALL.BAT")
+Copy-Item -LiteralPath (Join-Path $repo "guest\UNINSTALL.BAT") -Destination (Join-Path $bundle "UNINSTALL.BAT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\RELEASE.TXT") -Destination (Join-Path $bundle "README.TXT")
 Copy-Item -LiteralPath (Join-Path $repo "guest\COMPATIBILITY.TXT") -Destination (Join-Path $bundle "COMPATIBILITY.TXT")
 

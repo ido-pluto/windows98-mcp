@@ -16,7 +16,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.4.0"
+#define BUILD_ID "win98ctl-0.5.0"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
@@ -67,6 +67,8 @@ typedef struct {
     unsigned short port;
     char ini_path[MAX_PATH];
     char log_path[MAX_PATH];
+    char crash_path[MAX_PATH];
+    char supervisor_state_path[MAX_PATH];
 } CONFIG;
 
 /*
@@ -125,11 +127,24 @@ static HWND agent_main_window;
 static HWND agent_status_window;
 static HWND agent_close_button;
 static int agent_ui_stopping;
+static char last_request_id[128];
+static char last_request_method[128];
+static int last_request_active;
 typedef struct { char *text; } AGENT_MESSAGE;
 static int cooperative_stop(void);
 static int cooperative_sleep(unsigned long milliseconds);
 static int agent_stop_requested(void);
 static void set_agent_status(const char*text);
+
+static void write_crash_record(EXCEPTION_POINTERS *info) {
+    HANDLE f;DWORD written;char line[768];unsigned long code=0,address=0;
+    if(info&&info->ExceptionRecord){code=info->ExceptionRecord->ExceptionCode;address=(unsigned long)info->ExceptionRecord->ExceptionAddress;}
+    _snprintf(line,sizeof(line),"build=%s\r\nexceptionCode=0x%08lX\r\nexceptionAddress=0x%08lX\r\nlastRequestId=%s\r\nlastMethod=%s\r\nlastRequestActive=%s\r\n",BUILD_ID,code,address,last_request_id,last_request_method,last_request_active?"true":"false");line[sizeof(line)-1]=0;
+    f=CreateFileA(cfg.crash_path,GENERIC_WRITE,FILE_SHARE_READ,0,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);if(f!=INVALID_HANDLE_VALUE){WriteFile(f,line,strlen(line),&written,0);FlushFileBuffers(f);CloseHandle(f);}
+}
+static LONG WINAPI agent_unhandled_exception_filter(EXCEPTION_POINTERS *info) { write_crash_record(info);return EXCEPTION_CONTINUE_SEARCH; }
+static void set_last_operation(const char *request_id,const char *method) { strncpy(last_request_id,request_id?request_id:"",sizeof(last_request_id)-1);last_request_id[sizeof(last_request_id)-1]=0;strncpy(last_request_method,method?method:"",sizeof(last_request_method)-1);last_request_method[sizeof(last_request_method)-1]=0;last_request_active=1; }
+static void clear_last_operation(void) { last_request_id[0]=last_request_method[0]=0;last_request_active=0; }
 
 static void rotate_log_if_needed(void) {
     long size=0;char old_path[MAX_PATH];
@@ -437,6 +452,8 @@ static int command_is_direct_bash(const char*command) {
 static SHELL_SESSION *start_process(const char*command,const char*cwd,int direct) {
     SECURITY_ATTRIBUTES sa;HANDLE out_w=0,in_r=0,out_r_inherit=0,in_w_inherit=0,me;STARTUPINFOA si;PROCESS_INFORMATION pi;char*cmd;int i;
     for(i=0;i<MAX_SESSIONS&&sessions[i].used;i++);if(i==MAX_SESSIONS)return 0;
+    /* Never inherit stale fields when a previous shell failed part way through setup. */
+    memset(&sessions[i],0,sizeof(sessions[i]));
     memset(&sa,0,sizeof(sa));sa.nLength=sizeof(sa);sa.bInheritHandle=TRUE;
     if(!CreatePipe(&out_r_inherit,&out_w,&sa,0)||!CreatePipe(&in_r,&in_w_inherit,&sa,0))goto fail;
     me=GetCurrentProcess();
@@ -474,7 +491,7 @@ static unsigned long read_session(SHELL_SESSION*s,unsigned char*out,unsigned lon
 }
 static void close_session_handles(SHELL_SESSION*s) {
     if(!s||!s->used)return;
-    CloseHandle(s->pi.hProcess);CloseHandle(s->pi.hThread);if(s->in_write)CloseHandle(s->in_write);if(s->out_read)CloseHandle(s->out_read);if(s->replay)free(s->replay);memset(s,0,sizeof(*s));
+    if(s->pi.hProcess)CloseHandle(s->pi.hProcess);if(s->pi.hThread)CloseHandle(s->pi.hThread);if(s->in_write)CloseHandle(s->in_write);if(s->out_read)CloseHandle(s->out_read);if(s->replay)free(s->replay);memset(s,0,sizeof(*s));
 }
 
 typedef struct{char*out;unsigned long cap,n;int visible_only;} JSON_ACC;
@@ -599,6 +616,13 @@ static char *dispatch(const char*method,const char*j) {
       sprintf(a,"{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"%s\",\"osVersion\":\"%s\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"uptimeMs\":%lu}",
         BUILD_ID,platform_name,platform_version,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",GetTickCount());return ok_data(a);
     }
+    if(!strcmp(method,"agent_diagnostics")){
+      FILE*df;char crash[512],state[512],escaped_crash[3072],escaped_state[3072];unsigned long n;
+      crash[0]=state[0]=0;df=fopen(cfg.crash_path,"r");if(df){n=fread(crash,1,sizeof(crash)-1,df);crash[n]=0;fclose(df);}df=fopen(cfg.supervisor_state_path,"r");if(df){n=fread(state,1,sizeof(state)-1,df);state[n]=0;fclose(df);}
+      json_escape(crash,escaped_crash,sizeof(escaped_crash));json_escape(state,escaped_state,sizeof(escaped_state));
+      out=(char*)malloc(strlen(escaped_crash)+strlen(escaped_state)+512);if(!out)return error_result("OUT_OF_MEMORY","Diagnostics allocation failed");
+      sprintf(out,"{\"agentLogPath\":\"%s\",\"crashLogPath\":\"%s\",\"supervisorLogPath\":\"MCPSUPERVISOR.LOG\",\"supervisorState\":\"%s\",\"lastCrash\":\"%s\"}","MCPAGENT.LOG","MCPCRASH.LOG",escaped_state,escaped_crash);enc=ok_data(out);free(out);return enc;
+    }
     if(!strcmp(method,"show_message")){char *message=json_string_alloc(j,"message");if(!message)return string_error_result("message is required");action=post_agent_message(message);free(message);return action?ok_data("{\"accepted\":true}"):error_result("MESSAGE_UNAVAILABLE","The WIN98CTL status window is not available");}
     if(!strcmp(method,"system_reboot"))return schedule_system_exit(1,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
     if(!strcmp(method,"system_shutdown"))return schedule_system_exit(0,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
@@ -663,7 +687,16 @@ static char *dispatch(const char*method,const char*j) {
     }
     if(!strncmp(method,"shell_",6)){s=find_session(json_id(j,"session_id",0));if(!s)return error_result("SESSION_NOT_FOUND","Shell session is not active");
       if(!strcmp(method,"shell_read")){unsigned char*buf;unsigned long started=GetTickCount(),wait=json_long(j,"wait_ms",0),after=json_long(j,"after_cursor",s->replay_start),limit=json_long(j,"max_bytes",IO_CHUNK);char*text;if(limit>65536UL)limit=65536UL;if(limit<1)limit=1;buf=(unsigned char*)malloc(limit);if(!buf)return error_result("OUT_OF_MEMORY","Shell read allocation failed");do{if(cooperative_stop()){free(buf);return error_result("OPERATION_CANCELLED","Shell read was cancelled");}pump_session(s);if(after<s->replay_start){free(buf);sprintf(a,"{\"earliestCursor\":%lu,\"latestCursor\":%lu}",s->replay_start,s->cursor);return error_data("CURSOR_EXPIRED","Requested shell output is no longer retained.",a);}if(after>s->cursor){free(buf);return error_result("CURSOR_INVALID","after_cursor is beyond the current stream cursor");}got=replay_copy(s,after,buf,limit);if(got||s->exited)break;if(!cooperative_sleep(20)){free(buf);return error_result("OPERATION_CANCELLED","Shell read was cancelled");}}while(GetTickCount()-started<wait);enc=base64_encode(buf,got);text=ascii_escape_bytes(buf,got);free(buf);if(!enc||!text){free(enc);free(text);return error_result("OUT_OF_MEMORY","Shell result encoding failed");}out=(char*)malloc(strlen(enc)+strlen(text)+240);if(!out){free(enc);free(text);return error_result("OUT_OF_MEMORY","Shell response allocation failed");}sprintf(out,"{\"sessionId\":\"%lu\",\"combinedBase64\":\"%s\",\"combined\":\"%s\",\"stream\":\"stdout+stderr\",\"encoding\":\"oem\",\"cursor\":%lu,\"latestCursor\":%lu,\"earliestCursor\":%lu,\"running\":%s,\"exitCode\":%lu}",s->id,enc,text,after+got,s->cursor,s->replay_start,s->exited?"false":"true",s->exit_code);free(text);free(enc);enc=ok_data(out);free(out);return enc;}
-      if(!strcmp(method,"shell_write")){char*large;if(json_value(j,"base64")){large=json_string_alloc(j,"base64");if(!large)return string_error_result("base64 is invalid");bin=base64_decode(large,&bin_n);free(large);if(!bin)return error_result("INVALID_BASE64","Shell input is invalid");}else if(json_value(j,"text")){large=json_string_alloc(j,"text");if(!large)return string_error_result("text is invalid");bin=(unsigned char*)large;bin_n=strlen(large);}else{bin=(unsigned char*)_strdup("");bin_n=0;}if(!bin)return error_result("OUT_OF_MEMORY","Shell input allocation failed");if(bin_n&&(!s->in_write||!WriteFile(s->in_write,bin,bin_n,&written,0))){free(bin);return error_result("SHELL_WRITE_FAILED","Writing redirected stdin failed");}if(!bin_n)written=0;free(bin);if(json_bool(j,"eof",0)){if(s->in_write)CloseHandle(s->in_write);s->in_write=0;}sprintf(a,"{\"bytesWritten\":%lu}",written);return ok_data(a);}
+      if(!strcmp(method,"shell_write")){char*large;DWORD write_error=0;written=0;
+        pump_session(s);
+        if(s->exited)return error_result("SHELL_STDIN_CLOSED","The shell process has already exited");
+        if(json_value(j,"base64")){large=json_string_alloc(j,"base64");if(!large)return string_error_result("base64 is invalid");bin=base64_decode(large,&bin_n);free(large);if(!bin)return error_result("INVALID_BASE64","Shell input is invalid");}
+        else if(json_value(j,"text")){large=json_string_alloc(j,"text");if(!large)return string_error_result("text is invalid");bin=(unsigned char*)large;bin_n=strlen(large);}
+        else{bin=(unsigned char*)_strdup("");bin_n=0;}
+        if(!bin)return error_result("OUT_OF_MEMORY","Shell input allocation failed");
+        if(bin_n&&(!s->in_write||!WriteFile(s->in_write,bin,bin_n,&written,0))){write_error=GetLastError();free(bin);sprintf(a,"shell_write session=%lu bytes=%lu failed error=%lu inWrite=%lu",s->id,bin_n,(unsigned long)write_error,(unsigned long)s->in_write);log_line(a);sprintf(a,"Writing redirected stdin failed (Win32 error %lu)",(unsigned long)write_error);return error_result("SHELL_WRITE_FAILED",a);}
+        free(bin);if(json_bool(j,"eof",0)){if(s->in_write)CloseHandle(s->in_write);s->in_write=0;}
+        sprintf(a,"shell_write session=%lu bytes=%lu written=%lu eof=%s",s->id,bin_n,written,json_bool(j,"eof",0)?"true":"false");log_line(a);sprintf(a,"{\"bytesWritten\":%lu}",written);return ok_data(a);}
       if(!strcmp(method,"shell_terminate")){if(!TerminateProcess(s->pi.hProcess,1))return error_result("SHELL_TERMINATE_FAILED","TerminateProcess failed");WaitForSingleObject(s->pi.hProcess,5000);s->exited=1;GetExitCodeProcess(s->pi.hProcess,&s->exit_code);sprintf(a,"{\"running\":false,\"exitCode\":%lu}",s->exit_code);return ok_data(a);}
       if(!strcmp(method,"shell_close")){pump_session(s);if(!s->exited)return error_result("SESSION_ACTIVE","Terminate the session before closing");close_session_handles(s);return ok_data("{}");}
     }
@@ -733,7 +766,8 @@ static char* build_response_json(const char*method,const char*request_id,const c
 static int send_cooperative_response(unsigned long stream,const char*method,const char*request_id,const char*result) {
     char*response=build_response_json(method,request_id,result);int ok;
     if(!response)return 0;
-    ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response));free(response);return ok;
+    ok=w98_send_frame(control_socket,W98_F_RESPONSE,0,stream,control_tx_sequence++,0,response,strlen(response));free(response);
+    if(ok){log_line("cooperative response sent");clear_last_operation();}else log_line("cooperative response send failed");return ok;
 }
 static int cooperative_stop(void) {
     int ready;W98_FRAME f;w98_u8*payload;char method[128],rid[128];char*result;
@@ -744,7 +778,7 @@ static int cooperative_stop(void) {
       if(f.seq_hi||f.seq_lo!=control_rx_sequence++){free(payload);control_dead=1;break;}
       if(f.type==W98_F_PING){if(!w98_send_frame(control_socket,W98_F_PONG,0,f.stream_id,control_tx_sequence++,0,payload,f.payload_len))control_dead=1;free(payload);continue;}
       if(f.type==W98_F_CANCEL){control_cancelled=1;free(payload);continue;}
-      if(f.type==W98_F_REQUEST){method[0]=rid[0]=0;json_string((char*)payload,"method",method,sizeof(method));json_string((char*)payload,"requestId",rid,sizeof(rid));
+      if(f.type==W98_F_REQUEST){method[0]=rid[0]=0;json_string((char*)payload,"method",method,sizeof(method));json_string((char*)payload,"requestId",rid,sizeof(rid));set_last_operation(rid,method);
         if(!strcmp(method,"session_abort")||!strcmp(method,"sanitize")){control_aborted=1;cleanup_input();cleanup_sessions();cleanup_transfers();result=ok_data("{\"sanitized\":true}");}
         else result=error_result("VM_BUSY","A guest operation is already in progress");
         free(payload);if(!send_cooperative_response(f.stream_id,method,rid,result)){free(result);control_dead=1;break;}free(result);continue;
@@ -774,18 +808,18 @@ static int connected_loop(SOCKET s) {
     w98_u8 *payload;char json[4096],rid[128],method[128],platform_name[64],platform_version[64],*result,*resp;const char*wheel_command;W98_FRAME f;unsigned long off,chunk;
     wheel_command=GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"\"mouse_scroll\",":"";
     system_platform_info(platform_name,sizeof(platform_name),platform_version,sizeof(platform_version));
-    sprintf(json,"{\"kind\":\"guest_hello\",\"capabilities\":{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"%s\",\"osVersion\":\"%s\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"show_message\",\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_drives\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
+    sprintf(json,"{\"kind\":\"guest_hello\",\"capabilities\":{\"guestId\":\"win98-vm\",\"guestBuildId\":\"%s\",\"protocolVersion\":2,\"osName\":\"%s\",\"osVersion\":\"%s\",\"ansiCodePage\":%u,\"oemCodePage\":%u,\"screenWidth\":%d,\"screenHeight\":%d,\"colorDepth\":%d,\"supportsLongFileNames\":true,\"supportsMouseWheel\":%s,\"maxPath\":260,\"maxFileBytes\":2147483647,\"commands\":[\"show_message\",\"screen_capture\",\"mouse_move\",\"mouse_click\",\"mouse_down\",\"mouse_up\",\"mouse_drag\",%s\"mouse_position\",\"mouse_release_all\",\"keyboard_type\",\"keyboard_key\",\"keyboard_hotkey\",\"keyboard_keycode\",\"keyboard_release_all\",\"input_batch\",\"clipboard_get\",\"clipboard_set\",\"window_list\",\"window_focus\",\"window_close\",\"window_capture\",\"shell_exec\",\"shell_start\",\"shell_read\",\"shell_write\",\"shell_terminate\",\"shell_close\",\"process_list\",\"process_wait\",\"process_kill\",\"fs_drives\",\"fs_stat\",\"fs_list\",\"fs_mkdir\",\"fs_move\",\"fs_delete\",\"file_read_chunk\",\"file_write_begin\",\"file_write_chunk\",\"file_write_commit\",\"file_write_abort\",\"system_info\",\"agent_diagnostics\",\"system_reboot\",\"system_shutdown\",\"session_abort\",\"sanitize\"]}}",
       BUILD_ID,platform_name,platform_version,GetACP(),GetOEMCP(),GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),screen_color_depth(),GetSystemMetrics(SM_MOUSEWHEELPRESENT)?"true":"false",wheel_command);
     if(!w98_send_frame(s,W98_F_HELLO,0,0,0,0,json,strlen(json))||!receive_frame_with_timeout(s,&f,&payload,HANDSHAKE_TIMEOUT_MS))return 0;
     if(f.type!=W98_F_READY||f.seq_hi||f.seq_lo!=0){free(payload);return 0;}free(payload);
     log_line("guest ready");set_agent_status("Connected");control_socket=s;control_tx_sequence=1;control_rx_sequence=1;control_cancelled=control_aborted=control_dead=0;
     for(;;){if(!receive_frame_with_timeout(s,&f,&payload,CONTROL_IDLE_TIMEOUT_MS)){log_line("connection idle timeout or socket closed");break;}if(f.seq_hi||f.seq_lo!=control_rx_sequence++){free(payload);log_line("frame sequence validation failed");break;}
       if(f.type==W98_F_PING){w98_send_frame(s,W98_F_PONG,0,0,control_tx_sequence++,0,payload,f.payload_len);free(payload);continue;}
-      if(f.type!=W98_F_REQUEST){free(payload);continue;}control_cancelled=control_aborted=0;rid[0]=method[0]=0;json_string((char*)payload,"requestId",rid,sizeof(rid));json_string((char*)payload,"method",method,sizeof(method));result=dispatch(method,(char*)payload);free(payload);if(result&&strstr(result,"\"ok\":false"))cleanup_input();
+      if(f.type!=W98_F_REQUEST){free(payload);continue;}control_cancelled=control_aborted=0;rid[0]=method[0]=0;json_string((char*)payload,"requestId",rid,sizeof(rid));json_string((char*)payload,"method",method,sizeof(method));set_last_operation(rid,method);{char line[320];_snprintf(line,sizeof(line),"dispatch begin requestId=%s method=%s",rid,method);line[sizeof(line)-1]=0;log_line(line);}result=dispatch(method,(char*)payload);free(payload);if(result&&strstr(result,"\"ok\":false"))cleanup_input();
       if(pending_binary){for(off=0;off<pending_binary_len;off+=chunk){chunk=pending_binary_len-off;if(chunk>W98_MAX_DATA)chunk=W98_MAX_DATA;if(!w98_send_frame(s,W98_F_DATA,(off+chunk==pending_binary_len)?1:0,pending_binary_stream,control_tx_sequence++,0,pending_binary+off,chunk)){free(pending_binary);pending_binary=0;goto connection_end;}}free(pending_binary);pending_binary=0;pending_binary_len=0;}
       if(!result)result=error_result("OUT_OF_MEMORY","Guest could not allocate an operation result");if(!result)break;
       resp=build_response_json(method,rid,result);free(result);if(!resp)break;
-      if(!w98_send_frame(s,W98_F_RESPONSE,0,f.stream_id,control_tx_sequence++,0,resp,strlen(resp))){free(resp);break;}free(resp);
+      if(!w98_send_frame(s,W98_F_RESPONSE,0,f.stream_id,control_tx_sequence++,0,resp,strlen(resp))){log_line("response send failed; preserving crash context");free(resp);break;}free(resp);log_line("response sent");clear_last_operation();
     }
 connection_end:
     control_socket=INVALID_SOCKET;cleanup_input();
@@ -794,15 +828,15 @@ connection_end:
     return 1;
 }
 
-static int load_config(void) {
+static int load_config(int quiet) {
     char exe[MAX_PATH],dir[MAX_PATH];char*p;unsigned long exe_len;exe[0]=0;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(dir,exe);p=strrchr(dir,'\\');if(p)*p=0;
-    if(!safe_format(cfg.ini_path,MAX_PATH,"%s\\WIN98CTL.INI",dir,0)||!safe_format(cfg.log_path,MAX_PATH,"%s\\MCPAGENT.LOG",dir,0)){MessageBoxA(0,"WIN98CTL is installed in a path that is too long.","WIN98CTL configuration error",MB_ICONERROR);return 0;}
+    if(!safe_format(cfg.ini_path,MAX_PATH,"%s\\WIN98CTL.INI",dir,0)||!safe_format(cfg.log_path,MAX_PATH,"%s\\MCPAGENT.LOG",dir,0)||!safe_format(cfg.crash_path,MAX_PATH,"%s\\MCPCRASH.LOG",dir,0)||!safe_format(cfg.supervisor_state_path,MAX_PATH,"%s\\MCPSUPERVISOR.TXT",dir,0)){if(!quiet)MessageBoxA(0,"WIN98CTL is installed in a path that is too long.","WIN98CTL configuration error",MB_ICONERROR);return 0;}
     GetPrivateProfileStringA("connection","host","192.168.56.1",cfg.host,sizeof(cfg.host),cfg.ini_path);cfg.port=(unsigned short)GetPrivateProfileIntA("connection","port",9898,cfg.ini_path);
-    if(!cfg.host[0]||!cfg.port){MessageBoxA(0,"Set host and port in the [connection] section of WIN98CTL.INI.","WIN98CTL configuration error",MB_ICONERROR);return 0;}return 1;
+    if(!cfg.host[0]||!cfg.port){if(!quiet)MessageBoxA(0,"Set host and port in the [connection] section of WIN98CTL.INI.","WIN98CTL configuration error",MB_ICONERROR);return 0;}return 1;
 }
 static int install_startup(void) {
-    HKEY k;char exe[MAX_PATH],value[MAX_PATH+3];LONG r;unsigned long exe_len;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;if(_snprintf(value,sizeof(value),"\"%s\"",exe)<0)return 0;r=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_SET_VALUE,&k);
-    if(r==ERROR_SUCCESS){r=RegSetValueExA(k,"WIN98CTL",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
+    HKEY k;char exe[MAX_PATH],sup[MAX_PATH],value[MAX_PATH+3],*slash;LONG r;unsigned long exe_len;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(sup,exe);slash=strrchr(sup,'\\');if(!slash)return 0;strcpy(slash+1,"WIN98SUP.EXE");if(GetFileAttributesA(sup)==0xffffffffUL)return 0;if(_snprintf(value,sizeof(value),"\"%s\"",sup)<0)return 0;r=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_SET_VALUE,&k);
+    if(r==ERROR_SUCCESS){RegDeleteValueA(k,"WIN98CTL");r=RegSetValueExA(k,"WIN98SUP",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
 }
 static int self_test(void) {
     WSADATA wd;char path[MAX_PATH],dir[MAX_PATH],temp[MAX_PATH],platform_name[64],platform_version[64],*slash;FILE*f,*tf;unsigned char*d,pipebuf[1024];unsigned long n,total,start;volatile unsigned long reconnect_delay;int ok=1;SHELL_SESSION*s;
@@ -863,9 +897,11 @@ static HWND create_agent_window(HINSTANCE instance,int show) {
 
 int WINAPI WinMain(HINSTANCE hi,HINSTANCE prev,LPSTR cmd,int show) {
     HANDLE mutex;HWND hwnd;MSG message;DWORD thread_id;int message_result;
-    (void)prev;if(!load_config())return 2;
+    (void)prev;if(!load_config(strstr(cmd,"--supervised")!=0))return 2;
+    SetUnhandledExceptionFilter(agent_unhandled_exception_filter);
     if(strstr(cmd,"--install")){MessageBoxA(0,install_startup()?"Startup registration installed.":"Startup registration failed.","WIN98CTL",MB_OK);return 0;}
     if(strstr(cmd,"--self-test"))return self_test();
+    if(strstr(cmd,"--fault-test")){volatile int *fault=(volatile int*)0;log_line("intentional fault-test requested");*fault=1;}
     mutex=CreateMutexA(0,FALSE,"WIN98CTL_AGENT_SINGLE_INSTANCE");if(!mutex)return 3;if(GetLastError()==ERROR_ALREADY_EXISTS){log_line("second instance ignored; existing agent owns the reconnect loop");MessageBoxA(0,"WIN98CTL is already running.","WIN98CTL",MB_OK|MB_ICONINFORMATION);CloseHandle(mutex);return 3;}
     InitializeCriticalSection(&agent_status_lock);InitializeCriticalSection(&agent_socket_lock);agent_stop_event=CreateEventA(0,TRUE,FALSE,0);if(!agent_stop_event){DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 4;}
     hwnd=create_agent_window(hi,show);if(!hwnd){CloseHandle(agent_stop_event);agent_stop_event=0;DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 5;}

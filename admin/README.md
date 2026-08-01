@@ -20,12 +20,12 @@ The **Connected agents** panel lists each MCP/admin control connection. Use
 lease, the broker performs the normal guest cleanup and releases the VM before
 another agent can acquire it.
 
-**Exclusive lock agents** is enabled by default. Clearing it enables a
-broker-wide advisory parallel mode, so clients no longer wait for a lease. It
-does not create separate mice or keyboards: simultaneous input can collide.
-In this mode disconnect cleanup is limited to the disconnected session's
-broker-tracked terminals and transfers, so use it only when concurrent work is
-intentional.
+**Exclusive lock agents** is off by default. The broker accepts several clients
+and sends their guest operations through a FIFO queue, so concurrent MCP/admin
+work does not race the Windows 98 protocol. This does not create separate mice
+or keyboards: simultaneous UI input can still collide. Enable the checkbox
+when one agent must own all VM work; that opt-in mode provides `VM_BUSY` FIFO
+tickets and `vm_wait` lease coordination.
 
 ## Upstream proxy
 

@@ -49,6 +49,8 @@ if ($LASTEXITCODE -ne 0) { throw "Open Watcom build failed with exit code $LASTE
 
 $exe = Join-Path $guest "dist\WIN98CTL.EXE"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Build completed without producing $exe." }
+$supervisorExe = Join-Path $guest "dist\WIN98SUP.EXE"
+if (-not (Test-Path -LiteralPath $supervisorExe)) { throw "Build completed without producing $supervisorExe." }
 
 # Open Watcom 1.9 writes zero as .reloc's VirtualSize while publishing a
 # nonzero base-relocation data directory. Older Windows loaders tolerate this
@@ -108,8 +110,20 @@ if ($dump -notmatch 'subsystem major version number\s*=\s*0004H') {
     throw "Expected PE subsystem version 4.0 for the Windows 95/98 target."
 }
 
+$supervisorDump = (& $wdump $supervisorExe 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "wdump failed while auditing $supervisorExe." }
+$supervisorImports = [regex]::Matches($supervisorDump, 'DLL name\s*=\s*<([^>]+)>') |
+    ForEach-Object { $_.Groups[1].Value.ToUpperInvariant() } |
+    Sort-Object -Unique
+$supervisorAllowedImports = @("ADVAPI32.DLL","KERNEL32.DLL","USER32.DLL")
+$supervisorUnexpected = $supervisorImports | Where-Object { $_ -notin $supervisorAllowedImports }
+if ($supervisorUnexpected -or $supervisorImports.Count -eq 0) { throw "Supervisor PE compatibility audit failed: $($supervisorUnexpected -join ', ')" }
+if ($supervisorDump -notmatch 'subsystem major version number\s*=\s*0004H') { throw "Supervisor must target Windows subsystem 4.0." }
+
 Write-Host "Built $exe"
+Write-Host "Built $supervisorExe"
 Write-Host "SHA-256 $((Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash)"
 Write-Host "Compiler $compilerVersion"
 Write-Host "Imported DLL allowlist passed: $($imports -join ', ')"
-Write-Host "Copy required for a VM already using an older build: WIN98CTL.EXE (or restage and copy the complete package)."
+Write-Host "Supervisor import allowlist passed: $($supervisorImports -join ', ')"
+Write-Host "Copy required for a VM already using an older build: WIN98CTL.EXE and WIN98SUP.EXE (or restage and copy the complete package)."

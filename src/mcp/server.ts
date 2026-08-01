@@ -11,14 +11,14 @@ import { BrokerClient, BrokerClientError } from "./broker-client.js";
 import { ClientTransferRunner } from "./client-transfers.js";
 import { TRANSFER_METHODS } from "../host/transfers.js";
 
-export const MCP_SERVER_INSTRUCTIONS = `LOCKING AND CLEANUP ARE MANDATORY:
-1. vm_status and vm_capabilities are the only calls that never acquire the VM lease.
-2. The first VM-affecting call automatically locks the VM to this MCP session. Explicit vm_lock is optional.
-3. After every operational result, including an error, assume the VM is still locked by this session.
-4. Always call vm_unlock when the task is finished. Close active shell sessions and transfers first, or use vm_unlock(force=true) only when cleanup must be forced.
-5. If a call returns VM_BUSY, use the returned queue information and vm_wait (maximum ten minutes); do not attempt parallel control.
+export const MCP_SERVER_INSTRUCTIONS = `PARALLEL OPERATION AND CLEANUP:
+1. Parallel mode is the default. Several MCP/admin sessions may submit work at once; the broker sends guest operations through one FIFO queue because Windows 98 executes one request at a time.
+2. Queuing prevents protocol races, not UI collisions: mouse, keyboard, clipboard, focus, and screen state are shared. Coordinate or interactive input must be coordinated between agents.
+3. vm_unlock is still required after terminal, transfer, held-input, or other operational work. In parallel mode it cleans up only this session's tracked resources.
+4. vm_status, vm_capabilities, and agent_diagnostics are read-only. vm_lock/vm_wait become meaningful only if an operator enables Exclusive lock agents in the Admin app or broker configuration.
+5. If exclusive locking is enabled and a call returns VM_BUSY, use its FIFO ticket with vm_wait (maximum ten minutes).
 6. Never leave keys or mouse buttons held. Use keyboard_release_all and mouse_release_all after interrupted low-level input.
-7. MCP disconnect automatically aborts owned work and releases the lease after the guest confirms cleanup.
+7. MCP disconnect automatically aborts that session's tracked work. In exclusive mode it also releases the lease after guest cleanup.
 
 Coordinates are zero-based physical pixels on the primary Windows 98 display. Take a fresh screen_capture before coordinate-based input when screen state may have changed. shell_read is cursor-based streaming; full-screen DOS/TUI programs are unsupported.`;
 
@@ -666,6 +666,12 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     annotations: readOnly
   },
   {
+    name: "agent_diagnostics",
+    description: "Read the guest crash context and supervisor recovery status without acquiring the VM lease.",
+    inputSchema: empty,
+    annotations: readOnly
+  },
+  {
     name: "system_reboot",
     description:
       "Reboot Windows 98. This disconnects the guest and requires configured autostart for recovery.",
@@ -860,6 +866,7 @@ function withUnlockReminder(definition: ToolDefinition): string {
   if (
     definition.name === "vm_status" ||
     definition.name === "vm_capabilities" ||
+    definition.name === "agent_diagnostics" ||
     definition.name === "vm_unlock"
   ) {
     return definition.description;

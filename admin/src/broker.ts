@@ -16,3 +16,10 @@ export async function requestWithImage<T = unknown>(method: string, params: Reco
 export const status = () => request<BrokerStatus>("vm_status");
 export const testConnection = () => invoke<BrokerStatus>("wait_for_guest");
 export const showMessage = (message: string) => request("show_message", { message });
+export const agentDiagnostics = () => request<{
+  agentLogPath?: string;
+  crashLogPath?: string;
+  supervisorLogPath?: string;
+  supervisorState?: string;
+  lastCrash?: string;
+}>("agent_diagnostics");

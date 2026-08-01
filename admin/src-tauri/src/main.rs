@@ -34,7 +34,7 @@ struct Settings {
 fn default_upstream_port() -> u16 { DEFAULT_PORT }
 fn default_broker_host() -> String { "127.0.0.1".into() }
 fn default_broker_port() -> u16 { DEFAULT_BROKER_PORT }
-fn default_locking_enabled() -> bool { true }
+fn default_locking_enabled() -> bool { false }
 
 #[derive(Serialize)]
 struct Reply { ok: bool, #[serde(skip_serializing_if = "Option::is_none")] result: Option<Value>, #[serde(skip_serializing_if = "Option::is_none")] image: Option<Value>, #[serde(skip_serializing_if = "Option::is_none")] error: Option<String> }
@@ -46,7 +46,7 @@ fn settings_path() -> Result<PathBuf, String> {
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     Ok(root.join("runtime.json"))
 }
-fn default_settings() -> Settings { Settings { port: DEFAULT_PORT, broker_host: default_broker_host(), broker_port: DEFAULT_BROKER_PORT, locking_enabled: true, upstream_enabled: false, upstream_host: String::new(), upstream_port: DEFAULT_PORT } }
+fn default_settings() -> Settings { Settings { port: DEFAULT_PORT, broker_host: default_broker_host(), broker_port: DEFAULT_BROKER_PORT, locking_enabled: false, upstream_enabled: false, upstream_host: String::new(), upstream_port: DEFAULT_PORT } }
 fn read_settings() -> Settings { settings_path().ok().and_then(|p| fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(default_settings) }
 fn write_settings(settings: &Settings) -> Result<(), String> { fs::write(settings_path()?, serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?).map_err(|e| e.to_string()) }
 

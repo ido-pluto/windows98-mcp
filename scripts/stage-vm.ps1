@@ -20,10 +20,13 @@ if (-not $SkipBuild) {
 
 $exe = Join-Path $repo "guest\dist\WIN98CTL.EXE"
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing $exe. Build the guest first." }
+$supervisorExe = Join-Path $repo "guest\dist\WIN98SUP.EXE"
+if (-not (Test-Path -LiteralPath $supervisorExe)) { throw "Missing $supervisorExe. Build the guest first." }
 
 $stage = Join-Path $workspace "out\vm-drop"
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -Force -LiteralPath $exe -Destination (Join-Path $stage "WIN98CTL.EXE")
+Copy-Item -Force -LiteralPath $supervisorExe -Destination (Join-Path $stage "WIN98SUP.EXE")
 
 function Write-AsciiCrlf([string]$Source, [string]$Destination) {
     $text = [IO.File]::ReadAllText($Source)
@@ -39,7 +42,7 @@ function Get-Sha256Hex([string]$Path) {
     finally { $stream.Dispose(); $sha.Dispose() }
 }
 
-foreach ($name in @("RUNTEST.BAT", "INSTALL.BAT", "README.TXT", "COMPATIBILITY.TXT")) {
+foreach ($name in @("RUNTEST.BAT", "INSTALL.BAT", "UNINSTALL.BAT", "README.TXT", "COMPATIBILITY.TXT")) {
     Write-AsciiCrlf (Join-Path $repo "guest\$name") (Join-Path $stage $name)
 }
 
