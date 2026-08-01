@@ -24,7 +24,7 @@ Coordinates are zero-based physical pixels on the primary Windows 98 display. Ta
 
 type ObjectSchema = z.ZodObject<z.ZodRawShape>;
 
-interface ToolDefinition {
+export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: ObjectSchema | z.ZodType<Record<string, unknown>>;
@@ -692,6 +692,32 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     annotations: destructive
   }
 ];
+
+export function findToolDefinition(name: string): ToolDefinition | undefined {
+  return TOOL_DEFINITIONS.find((definition) => definition.name === name);
+}
+
+/** Shared MCP/CLI validation so defaults and constraints never drift. */
+export function validateToolParams(
+  name: string,
+  params: unknown
+): { ok: true; params: Record<string, unknown> } | { ok: false; message: string } {
+  const definition = findToolDefinition(name);
+  if (!definition) return { ok: false, message: `Unknown operation: ${name}` };
+  const parsed = definition.inputSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, message: parsed.error.issues.map((issue) => `${issue.path.join(".") || "params"}: ${issue.message}`).join("; ") };
+  }
+  return { ok: true, params: parsed.data as Record<string, unknown> };
+}
+
+export function toolCatalog(): Array<{ name: string; description: string; inputSchema: unknown }> {
+  return TOOL_DEFINITIONS.map((definition) => ({
+    name: definition.name,
+    description: withUnlockReminder(definition),
+    inputSchema: z.toJSONSchema(definition.inputSchema)
+  }));
+}
 
 export function createMcpServer(client: BrokerClient): McpServer {
   // A TCP broker can be on another computer. In that case transfer paths must

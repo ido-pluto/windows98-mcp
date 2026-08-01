@@ -9,7 +9,10 @@ export {
   brokerTimeout,
   brokerResponseToMcp,
   createMcpServer,
+  findToolDefinition,
   MCP_SERVER_INSTRUCTIONS,
-  TOOL_DEFINITIONS
+  TOOL_DEFINITIONS,
+  toolCatalog,
+  validateToolParams
 } from "./server.js";
 export { startStdioMcp, type StdioMcpOptions } from "./stdio.js";

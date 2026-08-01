@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { createInterface } from "node:readline";
 import { parseCliArgs } from "./cli-options.js";
 import {
   brokerIsReachable,
@@ -14,6 +16,9 @@ import {
 import { startStdioMcp } from "./mcp/index.js";
 import { BrokerClient } from "./mcp/broker-client.js";
 import { ClientTransferRunner } from "./mcp/client-transfers.js";
+import { brokerTimeout, findToolDefinition, toolCatalog, validateToolParams } from "./mcp/server.js";
+import { TRANSFER_METHODS } from "./host/transfers.js";
+import type { BrokerResponse, ToolResult } from "./shared/types.js";
 import { EXPECTED_GUEST_BUILD_ID } from "./shared/build-info.js";
 import { PACKAGE_VERSION } from "./shared/package-info.js";
 import { SimulatedGuest, writeSimulatorFixture } from "./simulator/index.js";
@@ -48,6 +53,15 @@ async function main(): Promise<void> {
         break;
       case "client-transfer":
         await runClientTransfer();
+        break;
+      case "tools":
+        runTools();
+        break;
+      case "call":
+        await runCall();
+        break;
+      case "rpc":
+        await runRpc();
         break;
       case "version":
         process.stdout.write(`${PACKAGE_VERSION}\n`);
@@ -90,10 +104,20 @@ async function runStdio(): Promise<void> {
       );
     }
   }
+  let brokerMonitor: NodeJS.Timeout | undefined;
+  if (isLocalBrokerHost(brokerHost)) {
+    brokerMonitor = setInterval(() => {
+      void ensureBroker(config).catch((error) => {
+        process.stderr.write(`[win98-mcp] local broker recovery failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
+    }, 2_000);
+    brokerMonitor.unref();
+  }
   await startStdioMcp({
     host: brokerHost,
     port: brokerPort,
-    requestTimeoutMs: 11 * 60 * 1000
+    requestTimeoutMs: 11 * 60 * 1000,
+    onClose: () => { if (brokerMonitor) clearInterval(brokerMonitor); }
   });
 }
 
@@ -223,6 +247,179 @@ async function runClientTransfer(): Promise<void> {
   }
 }
 
+function runTools(): void {
+  process.stdout.write(`${JSON.stringify({ tools: toolCatalog() }, null, 2)}\n`);
+}
+
+async function runCall(): Promise<void> {
+  const method = cli.commandArgs[0];
+  if (!method || cli.commandArgs.length !== 1) {
+    writeCliResult(cliError("CLI_USAGE", "Usage: windows98-mcp call <method> --params <JSON>"));
+    process.exitCode = 2;
+    return;
+  }
+  let validated: Record<string, unknown>;
+  try { validated = validateOperation(method, await readOperationParams()); }
+  catch (error) { writeCliResult(cliException(error)); process.exitCode = 2; return; }
+  if (cli.imageOut && method !== "screen_capture" && method !== "window_capture") {
+    writeCliResult(cliError("CLI_IMAGE_UNAVAILABLE", "--image-out is supported only by screen_capture and window_capture."));
+    process.exitCode = 2;
+    return;
+  }
+  if (isStatefulOneShot(method, validated)) { writeCliResult(cliError("CLI_STATEFUL_OPERATION", `${method} requires a persistent session; use windows98-mcp rpc.`)); process.exitCode = 2; return; }
+  let client: BrokerClient;
+  try { client = await createCliClient("cli-call"); }
+  catch (error) { writeCliResult(cliError("CLI_BROKER_UNAVAILABLE", errorMessage(error))); process.exitCode = 2; return; }
+  try {
+    const response = await executeCliOperation(client, method, validated);
+    if (cli.imageOut && response.image) {
+      await writeFile(cli.imageOut, Buffer.from(response.image.data, "base64"));
+    }
+    writeCliResult(response.result, response.image);
+    if (!response.result.ok) process.exitCode = 2;
+  } catch (error) {
+    writeCliResult(cliError("CLI_OPERATION_FAILED", errorMessage(error)));
+    process.exitCode = 2;
+  } finally {
+    await client.close({ cleanup: true });
+  }
+}
+
+async function runRpc(): Promise<void> {
+  let activeId: string | number | null = null;
+  const client = await createCliClient("cli-rpc", (progress) => {
+    writeRpc({ kind: "progress", id: activeId, source: "broker", progress });
+  });
+  const transfers = new ClientTransferRunner(client, (progress) => {
+    writeRpc({ kind: "progress", id: activeId, source: "client", progress });
+  });
+  try {
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    for await (const line of input) {
+      if (!line.trim()) continue;
+      let request: unknown;
+      try { request = JSON.parse(line) as unknown; }
+      catch { writeRpc({ kind: "response", id: null, result: cliError("CLI_INVALID_JSON", "Each rpc line must be JSON.") }); continue; }
+      if (!isCliRpcRequest(request)) {
+        writeRpc({ kind: "response", id: null, result: cliError("CLI_INVALID_REQUEST", "rpc requests require id, method, and params object.") });
+        continue;
+      }
+      activeId = request.id;
+      try {
+        const params = validateOperation(request.method, request.params);
+        const response = await executeCliOperation(client, request.method, params, transfers);
+        writeRpc({ kind: "response", id: request.id, result: response.result, ...(response.image ? { image: response.image } : {}) });
+      } catch (error) {
+        writeRpc({ kind: "response", id: request.id, result: cliException(error) });
+      } finally { activeId = null; }
+    }
+  } finally {
+    await client.close({ cleanup: true });
+  }
+}
+
+async function createCliClient(
+  label: string,
+  onProgress?: (progress: unknown) => void
+): Promise<BrokerClient> {
+  const config = await loadCliConfig();
+  const host = cli.brokerHost ?? "127.0.0.1";
+  if (isLocalBrokerHost(host)) await ensureBroker(config);
+  return new BrokerClient({
+    host,
+    port: cli.brokerPort ?? config.adapterPort,
+    sessionLabel: `${label}:${process.pid}`,
+    requestTimeoutMs: 11 * 60 * 1_000,
+    ...(onProgress ? { onProgress } : {})
+  });
+}
+
+async function readOperationParams(): Promise<Record<string, unknown>> {
+  if (cli.params !== undefined && cli.paramsFile !== undefined) throw new Error("CLI_INVALID:--params and --params-file are mutually exclusive");
+  const text = cli.paramsFile ? await readFile(cli.paramsFile, "utf8") : cli.params ?? "{}";
+  try {
+    const value = JSON.parse(text) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+    return value as Record<string, unknown>;
+  } catch {
+    throw new Error("CLI_INVALID_PARAMS: parameters must be a JSON object");
+  }
+}
+
+function validateOperation(method: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (!findToolDefinition(method)) {
+    throw new Error(`CLI_UNKNOWN_METHOD:${method}`);
+  }
+  const validated = validateToolParams(method, params);
+  if (!validated.ok) throw new Error(`CLI_INVALID_PARAMS:${validated.message}`);
+  return validated.params;
+}
+
+async function executeCliOperation(
+  client: BrokerClient,
+  method: string,
+  params: Record<string, unknown>,
+  transfers?: ClientTransferRunner
+): Promise<BrokerResponse> {
+  if (!findToolDefinition(method)) throw new Error(`CLI_UNKNOWN_METHOD:${method}`);
+  if (TRANSFER_METHODS.has(method)) {
+    const runner = transfers ?? new ClientTransferRunner(client, (progress) => {
+      process.stderr.write(`[win98-mcp] transfer ${JSON.stringify(progress)}\n`);
+    });
+    const data = await runner.execute(method, params);
+    const status = await client.request("vm_status");
+    if (!status.result.ok) {
+      return status;
+    }
+    return {
+      ...status,
+      id: "cli-transfer",
+      result: { ...status.result, ok: true, code: "OK", message: `${method} completed.`, data }
+    };
+  }
+  const timeoutMs = brokerTimeout(method, params);
+  return await client.request(method, params, timeoutMs === undefined ? {} : { timeoutMs });
+}
+
+function isStatefulOneShot(method: string, params: Record<string, unknown>): boolean {
+  if (["vm_lock", "vm_wait", "shell_start", "shell_read", "shell_write", "shell_terminate", "shell_close", "mouse_down"].includes(method)) return true;
+  if (method === "keyboard_key" || method === "keyboard_keycode") return params["action"] === "down";
+  if (method === "input_batch" && Array.isArray(params["actions"])) {
+    return params["actions"].some((action) => {
+      if (!action || typeof action !== "object" || Array.isArray(action)) return false;
+      const record = action as Record<string, unknown>;
+      return record["type"] === "mouse_down" ||
+        ((record["type"] === "keyboard_key" || record["type"] === "keyboard_keycode") && record["action"] === "down");
+    });
+  }
+  return false;
+}
+
+function cliError(code: string, message: string): ToolResult {
+  return { ok: false, code, message, requestId: "", connection: { state: "offline", epoch: 0 }, lease: { held: false, heldByCaller: false }, retryable: false };
+}
+
+function cliException(error: unknown): ToolResult {
+  const message = errorMessage(error);
+  return cliError(message.startsWith("CLI_INVALID_PARAMS:") ? "CLI_INVALID_PARAMS" : message.startsWith("CLI_UNKNOWN_METHOD:") ? "CLI_UNKNOWN_METHOD" : "CLI_OPERATION_FAILED", message);
+}
+
+function writeCliResult(result: ToolResult, image?: BrokerResponse["image"]): void {
+  process.stdout.write(`${JSON.stringify({ result, ...(image ? { image } : {}) })}\n`);
+}
+
+function writeRpc(value: unknown): void { process.stdout.write(`${JSON.stringify(value)}\n`); }
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isCliRpcRequest(value: unknown): value is { id: string | number; method: string; params: Record<string, unknown> } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (typeof record["id"] === "string" || typeof record["id"] === "number") && typeof record["method"] === "string" && !!record["params"] && typeof record["params"] === "object" && !Array.isArray(record["params"]);
+}
+
 async function ensureBroker(config: BrokerConfig): Promise<void> {
   if (await brokerIsReachable(config.pipePath)) return;
   const entry = process.argv[1];
@@ -285,6 +482,14 @@ With no command, the stdio MCP adapter starts for npx-based MCP clients.
   smoke-test          Exercise the connected guest safely
   diagnostics [dir]   Collect sanitized diagnostics
   client-transfer     Internal desktop-client transfer runner
+  tools               Print every MCP-compatible CLI operation and JSON schema
+  call <method>       Run one operation: --params '<JSON>' or --params-file file.json
+  rpc                 Run a persistent JSON-lines control session on stdin/stdout
+
+CLI control options:
+  --params <JSON>     JSON object for call (default: {})
+  --params-file <file> Read the call JSON object from a UTF-8 file
+  --image-out <file>  Save screen_capture/window_capture image data to a file
 
 Network and configuration options:
   --port <port>       Guest listener port (default: 9898)
@@ -299,6 +504,13 @@ Examples:
   npx windows98-mcp --port 9898
   npx windows98-mcp --broker-host 100.79.57.62 --broker-port 9899
   npx windows98-mcp broker --port 9898 --upstream 192.168.1.50:9898
+  npx windows98-mcp call mouse_click --params '{"x":120,"y":80}'
+  npx windows98-mcp call file_push --params '{"host_path":"C:\\work\\a.txt","guest_path":"C:\\MCPTEST\\a.txt"}'
+  npx windows98-mcp call screen_capture --params '{}' --image-out screen.png
+  echo {"id":"1","method":"vm_status","params":{}} | npx windows98-mcp rpc
+
+Use "tools" for every method and its exact JSON schema. call is one-shot and
+cleans up automatically; use rpc for terminals, held input, and workflows.
 `);
 }
 

@@ -37,6 +37,21 @@ describe("CLI options", () => {
     });
   });
 
+  it("accepts one-shot CLI operation JSON and persistent rpc mode", () => {
+    expect(parseCliArgs([
+      "call", "mouse_click", "--params", '{"x":10,"y":20}', "--image-out", "screen.png"
+    ])).toMatchObject({
+      command: "call",
+      commandArgs: ["mouse_click"],
+      params: '{"x":10,"y":20}',
+      imageOut: "screen.png"
+    });
+    expect(parseCliArgs(["rpc", "--params-file", "ignored.json"])).toMatchObject({
+      command: "rpc",
+      paramsFile: "ignored.json"
+    });
+  });
+
   it("rejects removed guest filtering/configuration options", () => {
     expect(() => parseCliArgs(["--ip", "192.168.60.128"])).toThrow("CLI_UNKNOWN_OPTION:--ip");
     expect(() => parseCliArgs(["configure"])).toThrow("UNKNOWN_COMMAND:configure");

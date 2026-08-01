@@ -158,6 +158,10 @@ export class BrokerClient {
       if (isBrokerProgress(value) && value.sessionId === this.sessionId) {
         continue;
       }
+      if (isBrokerSessionClosed(value) && value.sessionId === this.sessionId) {
+        this.socket?.destroy();
+        return;
+      }
       if (!isBrokerResponse(value)) {
         this.socket?.destroy(new Error("BROKER_RESPONSE_INVALID"));
         return;
@@ -237,6 +241,19 @@ function isReady(
     value !== null &&
     "kind" in value &&
     value.kind === "broker_ready" &&
+    "sessionId" in value &&
+    typeof value.sessionId === "string"
+  );
+}
+
+function isBrokerSessionClosed(
+  value: unknown
+): value is { kind: "broker_session_closed"; sessionId: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "broker_session_closed" &&
     "sessionId" in value &&
     typeof value.sessionId === "string"
   );

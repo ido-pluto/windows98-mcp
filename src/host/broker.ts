@@ -76,6 +76,9 @@ interface AdapterSession {
   buffer: string;
   greeted: boolean;
   resources: Set<string>;
+  /** Set after a transport loss while the broker retains this logical session. */
+  disconnectedAt?: string;
+  cleanupTimer?: NodeJS.Timeout;
 }
 
 interface ProcessedGuestResponse {
@@ -89,6 +92,8 @@ interface CleanupOutcome {
 }
 
 const LOCAL_MESSAGE_LIMIT = 2 * 1024 * 1024;
+/** Permit a stdio adapter to resume its logical session after a transient socket loss. */
+const ADAPTER_RESUME_GRACE_MS = 30_000;
 const DATA_FLAG_FINAL = 1;
 const SAFE_RETRY_METHODS = new Set([
   "screen_capture",
@@ -130,6 +135,11 @@ export class Broker {
   private guest: GuestConnection | undefined;
   private proxyBridge: UpstreamGuestBridge | undefined;
   private readonly adapters = new Map<string, AdapterSession>();
+  /** Explicitly disconnected sessions cannot silently resume their old ID. */
+  private readonly revokedAdapterSessions = new Set<string>();
+  /** Serialize work by logical adapter session, including a resumed socket.
+   * This avoids a replay racing an in-flight request on the old transport. */
+  private readonly adapterRequestChains = new Map<string, Promise<void>>();
   private readonly openResources = new Map<string, Set<string>>();
   private started = false;
   private stopping = false;
@@ -253,9 +263,12 @@ export class Broker {
     }
     this.lease.close();
     for (const adapter of this.adapters.values()) {
+      if (adapter.cleanupTimer) clearTimeout(adapter.cleanupTimer);
       adapter.socket.destroy();
     }
     this.adapters.clear();
+    this.adapterRequestChains.clear();
+    this.revokedAdapterSessions.clear();
     await this.transfers.abortAll();
     this.proxyBridge?.destroy();
     this.proxyBridge = undefined;
@@ -306,6 +319,34 @@ export class Broker {
     );
     if (local) {
       return local;
+    }
+
+    // Once a guest that was previously present goes away, do not make every
+    // subsequent tool call wait for the initial-connect timeout.  The stdio
+    // MCP server stays healthy and callers receive a cheap, retryable VM
+    // state instead.  A brand-new broker still gets its normal five-second
+    // initial connection window below.
+    if (this.isKnownGuestOffline()) {
+      if (method === "agent_diagnostics") {
+        return this.brokerResponse(
+          requestId,
+          this.result(
+            sessionId,
+            requestId,
+            true,
+            "OK",
+            "Broker diagnostics; the Windows guest is currently offline.",
+            false,
+            undefined,
+            {
+              guestOnline: false,
+              connection: this.snapshot,
+              guestDiagnosticsAvailable: false
+            }
+          )
+        );
+      }
+      return this.vmOfflineResponse(sessionId, requestId);
     }
 
     if (!(await this.waitForGuest())) {
@@ -586,6 +627,8 @@ export class Broker {
             sessionId: adapter.id,
             label: adapter.label,
             connectedAt: adapter.connectedAt,
+            connected: !adapter.disconnectedAt && !adapter.socket.destroyed,
+            ...(adapter.disconnectedAt ? { disconnectedAt: adapter.disconnectedAt } : {}),
             current: adapter.id === sessionId,
             holdsLease: this.lease.currentOwner?.sessionId === adapter.id,
             resources: [...(this.openResources.get(adapter.id) ?? [])]
@@ -613,7 +656,12 @@ export class Broker {
           sessionId, requestId, false, "SESSION_NOT_FOUND", "The requested agent session is no longer connected.", false
         ));
       }
-      target.socket.destroy();
+      // This is an intentional administrative disconnect, not a transient
+      // transport loss.  Do its cleanup immediately instead of granting the
+      // automatic-resume grace period used for a dropped MCP socket.
+      this.revokedAdapterSessions.add(target.id);
+      this.finalizeAdapterDisconnect(target, "adapter_disconnect_requested");
+      closeAdapterSession(target.socket, target.id, "disconnected_by_administrator");
       this.logger.write("warn", "adapter_disconnect_requested", {
         requestedBy: sessionId,
         targetSessionId,
@@ -907,6 +955,7 @@ export class Broker {
 
   private acceptAdapter(socket: Socket): void {
     socket.setNoDelay(true);
+    socket.setKeepAlive(true, 10_000);
     const provisionalId = randomUUID();
     const adapter: AdapterSession = {
       id: provisionalId,
@@ -953,8 +1002,29 @@ export class Broker {
       if (!isBrokerHello(message)) {
         throw new Error("BROKER_HELLO_REQUIRED");
       }
-      if (this.adapters.has(message.sessionId)) {
-        throw new Error("SESSION_ALREADY_CONNECTED");
+      if (this.revokedAdapterSessions.has(message.sessionId)) {
+        closeAdapterSession(
+          adapter.socket,
+          message.sessionId,
+          "disconnected_by_administrator"
+        );
+        return;
+      }
+      const previous = this.adapters.get(message.sessionId);
+      if (previous && previous.label !== message.sessionLabel.slice(0, 128)) {
+        throw new Error("SESSION_LABEL_MISMATCH");
+      }
+      if (previous) {
+        if (previous.cleanupTimer) {
+          clearTimeout(previous.cleanupTimer);
+          delete previous.cleanupTimer;
+        }
+        // A reconnect can race the old socket's close notification.  Replace
+        // it atomically in the map before destroying it, so that old close
+        // cannot clean up the resumed logical session.
+        if (previous.socket !== adapter.socket && !previous.socket.destroyed) {
+          previous.socket.destroy();
+        }
       }
       adapter.id = message.sessionId;
       adapter.label = message.sessionLabel.slice(0, 128);
@@ -965,9 +1035,10 @@ export class Broker {
         sessionId: adapter.id,
         connection: this.snapshot
       });
-      this.logger.write("info", "adapter_connected", {
+      this.logger.write("info", previous ? "adapter_resumed" : "adapter_connected", {
         sessionId: adapter.id,
-        sessionLabel: adapter.label
+        sessionLabel: adapter.label,
+        ...(previous?.disconnectedAt ? { disconnectedAt: previous.disconnectedAt } : {})
       });
       return;
     }
@@ -977,33 +1048,139 @@ export class Broker {
     if (message.sessionId !== adapter.id || message.sessionLabel !== adapter.label) {
       throw new Error("SESSION_IDENTITY_MISMATCH");
     }
-    const response = await this.execute(
-      adapter.id,
-      adapter.label,
-      message.method,
-      message.params
-    );
-    response.id = message.id;
-    writeLine(adapter.socket, response);
+    // The old transport can still yield a buffered data event after a resumed
+    // socket has replaced it. Its request must not be accepted a second time.
+    if (this.adapters.get(adapter.id) !== adapter) {
+      return;
+    }
+    // Do not hold the socket parser behind a slow guest operation. The
+    // logical-session queue preserves execution order while allowing a later
+    // vm_unlock to be accepted immediately during adapter shutdown.
+    void this.enqueueAdapterRequest(adapter.id, async () => {
+      const response = await this.execute(
+        adapter.id,
+        adapter.label,
+        message.method,
+        message.params
+      );
+      response.id = message.id;
+      // A resumed adapter can replace this socket while a previous request is
+      // running. Return its response on the current logical-session socket.
+      const current = this.adapters.get(adapter.id);
+      if (current?.greeted && !current.socket.destroyed) {
+        writeLine(current.socket, response);
+      }
+    }).catch((error) => {
+      this.logger.write("warn", "adapter_request_failed", {
+        error,
+        sessionId: adapter.id,
+        sessionLabel: adapter.label
+      });
+      const current = this.adapters.get(adapter.id);
+      current?.socket.destroy();
+    });
   }
 
   private adapterClosed(adapter: AdapterSession): void {
     if (!adapter.greeted || this.adapters.get(adapter.id) !== adapter) {
       return;
     }
+    if (adapter.disconnectedAt) {
+      return;
+    }
+    adapter.disconnectedAt = new Date().toISOString();
+    adapter.cleanupTimer = setTimeout(() => {
+      if (this.adapters.get(adapter.id) !== adapter || !adapter.disconnectedAt) {
+        return;
+      }
+      this.finalizeAdapterDisconnect(adapter, "adapter_disconnect_grace_expired");
+    }, ADAPTER_RESUME_GRACE_MS);
+    adapter.cleanupTimer.unref();
+    this.logger.write("info", "adapter_disconnected_grace", {
+      sessionId: adapter.id,
+      sessionLabel: adapter.label,
+      graceMs: ADAPTER_RESUME_GRACE_MS
+    });
+  }
+
+  /** Permanently remove a logical adapter after explicit disconnect or grace expiry. */
+  private finalizeAdapterDisconnect(adapter: AdapterSession, reason: string): void {
+    if (this.adapters.get(adapter.id) !== adapter) {
+      return;
+    }
+    if (adapter.cleanupTimer) {
+      clearTimeout(adapter.cleanupTimer);
+      delete adapter.cleanupTimer;
+    }
     this.adapters.delete(adapter.id);
     const relation = this.lease.disconnect(adapter.id);
     this.logger.write("info", "adapter_disconnected", {
       sessionId: adapter.id,
-      relation
+      relation,
+      reason
     });
     if (relation === "owner") {
-      void this.enqueueCleanup(adapter.id, "adapter_disconnect", true, true);
+      this.enqueueFinalSessionCleanup(adapter.id, reason, true, true);
     } else if (!this.config.lockingEnabled) {
       // In advisory parallel mode there is no lease owner, but this adapter
       // can still own broker-tracked terminal or transfer resources.
-      void this.enqueueCleanup(adapter.id, "adapter_disconnect_parallel", true, false);
+      this.enqueueFinalSessionCleanup(
+        adapter.id,
+        `${reason}_parallel`,
+        true,
+        false
+      );
+    } else {
+      this.discardSessionQueueWhenIdle(adapter.id);
     }
+  }
+
+  /**
+   * Keep disconnect cleanup behind already-accepted work for the same logical
+   * session. A client can reconnect with its stable session ID just as the
+   * grace period expires; its new work must wait for both the old request and
+   * the cleanup rather than running concurrently with either.
+   */
+  private enqueueFinalSessionCleanup(
+    sessionId: string,
+    reason: string,
+    force: boolean,
+    releaseOwner: boolean
+  ): void {
+    void this.enqueueAdapterRequest(sessionId, async () => {
+      await this.enqueueCleanup(sessionId, reason, force, releaseOwner);
+    })
+      .catch((error) => {
+        this.logger.write("error", "adapter_disconnect_cleanup_failed", {
+          error,
+          sessionId,
+          reason
+        });
+      })
+      .finally(() => this.discardSessionQueueWhenIdle(sessionId));
+  }
+
+  private discardSessionQueueWhenIdle(sessionId: string): void {
+    const tail = this.adapterRequestChains.get(sessionId);
+    if (!tail) return;
+    void tail.finally(() => {
+      if (!this.adapters.has(sessionId) && this.adapterRequestChains.get(sessionId) === tail) {
+        this.adapterRequestChains.delete(sessionId);
+      }
+    });
+  }
+
+  private async enqueueAdapterRequest(
+    sessionId: string,
+    action: () => Promise<void>
+  ): Promise<void> {
+    const previous = this.adapterRequestChains.get(sessionId) ?? Promise.resolve();
+    const operation = previous.then(action, action);
+    this.adapterRequestChains.set(
+      sessionId,
+      operation.then(() => undefined, () => undefined)
+    );
+    await operation;
   }
 
   private acceptGuest(socket: Socket): void {
@@ -1114,9 +1291,15 @@ export class Broker {
     }
     this.guest = undefined;
     this.capabilities = undefined;
+    const prior = this.connectionState;
     this.connectionState = {
       state: "offline",
-      epoch: this.connectionEpoch
+      epoch: this.connectionEpoch,
+      ...(prior.connectedAt ? { connectedAt: prior.connectedAt } : {}),
+      lastSeenAt: new Date(guest.lastSeenAt).toISOString(),
+      ...(prior.guestBuildId ? { guestBuildId: prior.guestBuildId } : {}),
+      ...(prior.remoteAddress ? { remoteAddress: prior.remoteAddress } : {}),
+      offlineReason: error ? errorMessage(error).slice(0, 512) : "guest_connection_closed"
     };
     this.logger.write("warn", "guest_disconnected", {
       error,
@@ -1387,6 +1570,30 @@ export class Broker {
       await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
     return false;
+  }
+
+  private isKnownGuestOffline(): boolean {
+    return this.connectionState.state === "offline" && this.connectionState.lastSeenAt !== undefined;
+  }
+
+  private vmOfflineResponse(sessionId: string, requestId: string): BrokerResponse {
+    const lastSeen = this.connectionState.lastSeenAt;
+    return this.brokerResponse(
+      requestId,
+      this.result(
+        sessionId,
+        requestId,
+        false,
+        "VM_OFFLINE",
+        "Windows is currently offline and cannot receive guest commands.",
+        true,
+        "Start or resume WIN98CTL.EXE. The MCP tools remain available and will work again after the guest reconnects.",
+        {
+          lastSeenAt: lastSeen,
+          offlineReason: this.connectionState.offlineReason ?? "guest_connection_closed"
+        }
+      )
+    );
   }
 }
 
@@ -1818,6 +2025,15 @@ function closeServer(server: Server | undefined): Promise<void> {
 
 function writeLine(socket: Socket, value: unknown): void {
   socket.write(`${JSON.stringify(value)}\n`);
+}
+
+function closeAdapterSession(socket: Socket, sessionId: string, reason: string): void {
+  if (socket.destroyed) return;
+  socket.write(
+    `${JSON.stringify({ kind: "broker_session_closed", sessionId, reason })}\n`,
+    "utf8",
+    () => socket.destroy()
+  );
 }
 
 function isBrokerHello(value: unknown): value is BrokerHello {

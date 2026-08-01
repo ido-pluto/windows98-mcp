@@ -13,6 +13,8 @@ export const DEFAULT_BROKER_PIPE = defaultPipePath();
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_LINE_BYTES = 64 * 1024 * 1024;
+const RECONNECT_INITIAL_MS = 250;
+const RECONNECT_MAX_MS = 5_000;
 
 export interface BrokerClientOptions {
   pipePath?: string;
@@ -23,6 +25,8 @@ export interface BrokerClientOptions {
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   maxLineBytes?: number;
+  /** Receives broker-originated transfer progress for persistent CLI clients. */
+  onProgress?: (progress: unknown) => void;
 }
 
 export interface BrokerRequestOptions {
@@ -63,10 +67,20 @@ export class BrokerClient {
   private readonly requestTimeoutMs: number;
   private readonly maxLineBytes: number;
   private socket: Socket | undefined;
+  /** A connecting socket is not yet the active session socket, but must still
+   * be destroyed when the client is closed. */
+  private openingSocket: Socket | undefined;
   private connectPromise: Promise<Socket> | undefined;
   private receiveBuffer = "";
   private readonly pending = new Map<string, PendingRequest>();
   private closed = false;
+  private reconnecting = false;
+  private requestChain: Promise<void> = Promise.resolve();
+  private readyCallback: ((socket: Socket) => void) | undefined;
+  private readonly onProgress: ((progress: unknown) => void) | undefined;
+  /** Avoid creating a new broker connection merely to clean up a session that
+   * never submitted any work (for example an empty or malformed rpc stream). */
+  private hasSentRequest = false;
 
   constructor(options: BrokerClientOptions = {}) {
     this.pipePath =
@@ -91,6 +105,7 @@ export class BrokerClient {
     this.requestTimeoutMs =
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.maxLineBytes = options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
+    this.onProgress = options.onProgress;
   }
 
   async request(
@@ -106,59 +121,33 @@ export class BrokerClient {
       );
     }
 
-    const socket = await this.ensureConnected();
-    const id = randomUUID();
-    const request: BrokerRequest = {
-      kind: "broker_request",
-      id,
-      sessionId: this.sessionId,
-      sessionLabel: this.sessionLabel,
-      method,
-      params
-    };
     const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-
-    return await new Promise<BrokerResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(
-          new BrokerClientError(
-            "BROKER_REQUEST_TIMEOUT",
-            `Broker request ${method} timed out after ${timeoutMs} ms.`
-          )
-        );
-      }, timeoutMs);
-      timer.unref();
-
-      this.pending.set(id, { resolve, reject, timer });
-      socket.write(`${JSON.stringify(request)}\n`, "utf8", (error) => {
-        if (!error) {
-          return;
-        }
-        const pending = this.pending.get(id);
-        if (!pending) {
-          return;
-        }
-        clearTimeout(pending.timer);
-        this.pending.delete(id);
-        pending.reject(
-          new BrokerClientError(
-            "BROKER_WRITE_FAILED",
-            `Could not send ${method} to the broker: ${error.message}`
-          )
-        );
-      });
-    });
+    const operation = this.requestChain.then(() =>
+      this.requestWithRecovery(method, params, timeoutMs)
+    );
+    this.requestChain = operation.then(() => undefined, () => undefined);
+    return await operation;
   }
 
-  async close(): Promise<void> {
+  async close(options: { cleanup?: boolean } = {}): Promise<void> {
     if (this.closed) {
       return;
     }
+    if (options.cleanup && this.hasSentRequest) {
+      // Bypass the caller's ordered request chain. A stdio EOF can happen
+      // while a long request is still awaiting a result; cleanup must be sent
+      // to the broker immediately (the broker preserves guest-side order).
+      await this.requestWithRecovery("vm_unlock", { force: true }, 5_000)
+        .catch(() => undefined);
+    }
     this.closed = true;
     this.connectPromise = undefined;
+    const openingSocket = this.openingSocket;
+    this.openingSocket = undefined;
+    openingSocket?.destroy();
     const socket = this.socket;
     this.socket = undefined;
+    this.readyCallback = undefined;
     this.rejectPending(
       new BrokerClientError(
         "BROKER_CLIENT_CLOSED",
@@ -198,12 +187,19 @@ export class BrokerClient {
       const socket = this.host
         ? connect({ host: this.host, port: this.port! })
         : connect(this.pipePath);
+      this.openingSocket = socket;
       let settled = false;
+      const clearOpeningSocket = (): void => {
+        if (this.openingSocket === socket) {
+          this.openingSocket = undefined;
+        }
+      };
       const timeout = setTimeout(() => {
         if (settled) {
           return;
         }
         settled = true;
+        clearOpeningSocket();
         socket.destroy();
         reject(
           new BrokerClientError(
@@ -220,6 +216,7 @@ export class BrokerClient {
         }
         settled = true;
         clearTimeout(timeout);
+        clearOpeningSocket();
         socket.destroy();
         reject(
           new BrokerClientError(
@@ -229,16 +226,35 @@ export class BrokerClient {
         );
       };
 
+      const closeBeforeReady = (): void => {
+        failConnect(new BrokerClientError(
+          "BROKER_DISCONNECTED",
+          "The broker closed the connection before confirming the session."
+        ));
+      };
+
       socket.setEncoding("utf8");
+      socket.setNoDelay(true);
+      socket.setKeepAlive(true, 10_000);
       socket.once("error", failConnect);
+      socket.once("close", closeBeforeReady);
       socket.once("connect", () => {
-        if (settled) {
+        if (settled || this.closed) {
+          clearOpeningSocket();
+          socket.destroy();
           return;
         }
-        settled = true;
-        clearTimeout(timeout);
-        socket.off("error", failConnect);
         this.attachSocket(socket);
+        clearOpeningSocket();
+        this.readyCallback = (readySocket) => {
+          if (readySocket !== socket || settled || this.closed) return;
+          settled = true;
+          clearTimeout(timeout);
+          socket.off("error", failConnect);
+          socket.off("close", closeBeforeReady);
+          this.readyCallback = undefined;
+          resolve(socket);
+        };
 
         const hello: BrokerHello = {
           kind: "broker_hello",
@@ -248,7 +264,7 @@ export class BrokerClient {
         socket.write(`${JSON.stringify(hello)}\n`, "utf8", (error) => {
           if (error) {
             socket.destroy(error);
-            reject(
+            failConnect(
               new BrokerClientError(
                 "BROKER_HELLO_FAILED",
                 `Could not initialize broker session: ${error.message}`
@@ -256,7 +272,6 @@ export class BrokerClient {
             );
             return;
           }
-          resolve(socket);
         });
       });
     });
@@ -265,7 +280,7 @@ export class BrokerClient {
   private attachSocket(socket: Socket): void {
     this.receiveBuffer = "";
     this.socket = socket;
-    socket.on("data", (chunk: string) => this.handleData(chunk));
+    socket.on("data", (chunk: string) => this.handleData(socket, chunk));
     socket.on("error", (error) => {
       this.handleDisconnect(
         socket,
@@ -286,7 +301,12 @@ export class BrokerClient {
     });
   }
 
-  private handleData(chunk: string): void {
+  private handleData(socket: Socket, chunk: string): void {
+    // A close/reconnect race can leave a buffered data event on the old
+    // socket. Never let an old frame satisfy a request on the replacement.
+    if (this.socket !== socket) {
+      return;
+    }
     this.receiveBuffer += chunk;
     if (Buffer.byteLength(this.receiveBuffer, "utf8") > this.maxLineBytes) {
       const error = new BrokerClientError(
@@ -294,7 +314,7 @@ export class BrokerClient {
         `Broker response exceeded ${this.maxLineBytes} bytes.`,
         false
       );
-      this.socket?.destroy(error);
+      socket.destroy(error);
       return;
     }
 
@@ -308,16 +328,19 @@ export class BrokerClient {
       if (line.length === 0) {
         continue;
       }
-      this.handleLine(line);
+      this.handleLine(socket, line);
     }
   }
 
-  private handleLine(line: string): void {
+  private handleLine(socket: Socket, line: string): void {
+    if (this.socket !== socket) {
+      return;
+    }
     let value: unknown;
     try {
       value = JSON.parse(line) as unknown;
     } catch (error) {
-      this.socket?.destroy(
+      socket.destroy(
         new BrokerClientError(
           "BROKER_RESPONSE_INVALID",
           `Broker sent invalid JSON: ${errorMessage(error)}`,
@@ -327,14 +350,27 @@ export class BrokerClient {
       return;
     }
 
+    if (isBrokerSessionClosed(value, this.sessionId)) {
+      this.closeFromBroker(
+        new BrokerClientError(
+          "BROKER_SESSION_DISCONNECTED",
+          "This MCP/CLI session was disconnected by a broker administrator.",
+          false
+        )
+      );
+      return;
+    }
+
     if (isBrokerReady(value, this.sessionId)) {
+      this.readyCallback?.(socket);
       return;
     }
     if (isBrokerProgress(value, this.sessionId)) {
+      this.onProgress?.((value as Record<string, unknown>)["progress"]);
       return;
     }
     if (!isBrokerResponse(value)) {
-      this.socket?.destroy(
+      socket.destroy(
         new BrokerClientError(
           "BROKER_RESPONSE_INVALID",
           "Broker sent a message that is not a broker_response.",
@@ -360,6 +396,100 @@ export class BrokerClient {
     this.socket = undefined;
     this.receiveBuffer = "";
     this.rejectPending(error);
+    if (!this.closed) {
+      void this.reconnectForever();
+    }
+  }
+
+  private closeFromBroker(error: BrokerClientError): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.connectPromise = undefined;
+    this.readyCallback = undefined;
+    const openingSocket = this.openingSocket;
+    this.openingSocket = undefined;
+    openingSocket?.destroy();
+    const socket = this.socket;
+    this.socket = undefined;
+    this.rejectPending(error);
+    socket?.destroy();
+  }
+
+  private async requestWithRecovery(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<BrokerResponse> {
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    let lastError: Error | undefined;
+    while (!this.closed && Date.now() < deadline) {
+      attempts += 1;
+      try {
+        const socket = await this.ensureConnected();
+        const response = await this.sendOnce(socket, method, params, Math.max(1, deadline - Date.now()));
+        if (attempts > 1) {
+          response.result.recovery = { replayed: true, attempts };
+        }
+        return response;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (this.closed || !isRecoverableBrokerError(lastError)) {
+          throw lastError;
+        }
+        await sleep(Math.min(RECONNECT_MAX_MS, RECONNECT_INITIAL_MS * Math.min(attempts, 20)));
+      }
+    }
+    throw new BrokerClientError(
+      "BROKER_RECONNECTING",
+      `Broker recovery did not complete while replaying ${method}: ${lastError?.message ?? "connection unavailable"}`
+    );
+  }
+
+  private async sendOnce(
+    socket: Socket,
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<BrokerResponse> {
+    const id = randomUUID();
+    const request: BrokerRequest = { kind: "broker_request", id, sessionId: this.sessionId, sessionLabel: this.sessionLabel, method, params };
+    return await new Promise<BrokerResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        // A timeout has an unknown outcome. Only a confirmed transport loss
+        // is replayed; replaying a live request can duplicate side effects.
+        reject(new BrokerClientError("BROKER_REQUEST_TIMEOUT", `Broker request ${method} timed out after ${timeoutMs} ms.`, false));
+      }, timeoutMs);
+      timer.unref();
+      this.pending.set(id, { resolve, reject, timer });
+      this.hasSentRequest = true;
+      socket.write(`${JSON.stringify(request)}\n`, "utf8", (error) => {
+        if (!error) return;
+        const pending = this.pending.get(id); if (!pending) return;
+        clearTimeout(pending.timer); this.pending.delete(id);
+        pending.reject(new BrokerClientError("BROKER_WRITE_FAILED", `Could not send ${method} to the broker: ${error.message}`));
+      });
+    });
+  }
+
+  private async reconnectForever(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    let delay = RECONNECT_INITIAL_MS;
+    try {
+      while (!this.closed && !this.socket) {
+        try {
+          await this.ensureConnected();
+          return;
+        } catch {
+          await sleep(delay);
+          delay = Math.min(RECONNECT_MAX_MS, delay * 2);
+        }
+      }
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   private get endpoint(): string {
@@ -375,6 +505,14 @@ export class BrokerClient {
   }
 }
 
+function isRecoverableBrokerError(error: Error): boolean {
+  return !(error instanceof BrokerClientError) || error.retryable;
+}
+
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function isBrokerReady(value: unknown, sessionId: string): boolean {
   if (!value || typeof value !== "object") {
     return false;
@@ -384,6 +522,12 @@ function isBrokerReady(value: unknown, sessionId: string): boolean {
     candidate["kind"] === "broker_ready" &&
     candidate["sessionId"] === sessionId
   );
+}
+
+function isBrokerSessionClosed(value: unknown, sessionId: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return candidate["kind"] === "broker_session_closed" && candidate["sessionId"] === sessionId;
 }
 
 function isBrokerResponse(value: unknown): value is BrokerResponse {

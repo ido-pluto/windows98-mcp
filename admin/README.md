@@ -6,6 +6,10 @@ Choose the archive that matches the **host** computer: `windows-x64` is for ordi
 
 It starts the bundled Node broker sidecar, waits up to five seconds for the Windows 98 guest (which always dials the host), shows status/capabilities, displays a Win98 message box, streams a command, transfers files/directories, and previews/saves screenshots through native Windows dialogs.
 
+If the VM is powered off, the broker and connected MCP tools remain alive. VM
+operations return retryable `VM_OFFLINE` until the guest reconnects; no Codex
+or MCP restart is required.
+
 Files selected in the desktop app always belong to the computer running that
 app. This remains true when the app connects directly to a broker on another
 machine: the bundled client sidecar transfers them over the TCP control

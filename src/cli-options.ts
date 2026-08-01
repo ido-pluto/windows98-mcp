@@ -8,6 +8,9 @@ export const CLI_COMMANDS = [
   "smoke-test",
   "diagnostics",
   "client-transfer",
+  "tools",
+  "call",
+  "rpc",
   "help",
   "version"
 ] as const;
@@ -23,6 +26,9 @@ export interface ParsedCliOptions {
   brokerHost?: string;
   brokerPort?: number;
   transferRequest?: string;
+  params?: string;
+  paramsFile?: string;
+  imageOut?: string;
 }
 
 const COMMANDS = new Set<string>(CLI_COMMANDS);
@@ -36,6 +42,9 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
   let brokerHost: string | undefined;
   let brokerPort: number | undefined;
   let transferRequest: string | undefined;
+  let params: string | undefined;
+  let paramsFile: string | undefined;
+  let imageOut: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -114,6 +123,18 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       transferRequest = option.value ?? requireValue(argv, ++index, option.name);
       continue;
     }
+    if (option.name === "--params") {
+      params = option.value ?? requireValue(argv, ++index, option.name);
+      continue;
+    }
+    if (option.name === "--params-file") {
+      paramsFile = option.value ?? requireValue(argv, ++index, option.name);
+      continue;
+    }
+    if (option.name === "--image-out") {
+      imageOut = option.value ?? requireValue(argv, ++index, option.name);
+      continue;
+    }
 
     if (!command && COMMANDS.has(token)) {
       command = token as CliCommand;
@@ -137,6 +158,9 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     , ...(brokerHost ? { brokerHost } : {})
     , ...(brokerPort !== undefined ? { brokerPort } : {})
     , ...(transferRequest ? { transferRequest } : {})
+    , ...(params !== undefined ? { params } : {})
+    , ...(paramsFile ? { paramsFile } : {})
+    , ...(imageOut ? { imageOut } : {})
   };
 }
 

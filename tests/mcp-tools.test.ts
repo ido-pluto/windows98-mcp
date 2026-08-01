@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   brokerTimeout,
   MCP_SERVER_INSTRUCTIONS,
-  TOOL_DEFINITIONS
+  TOOL_DEFINITIONS,
+  toolCatalog,
+  validateToolParams
 } from "../src/mcp/index.js";
 
 describe("MCP tool surface", () => {
@@ -40,6 +42,16 @@ describe("MCP tool surface", () => {
     const diagnostics = requireTool("agent_diagnostics");
     expect(diagnostics.annotations?.readOnlyHint).toBe(true);
     expect(diagnostics.inputSchema.safeParse({}).success).toBe(true);
+  });
+
+  it("shares the complete MCP schema catalog with non-MCP clients", () => {
+    expect(toolCatalog().map((tool) => tool.name)).toEqual(TOOL_DEFINITIONS.map((tool) => tool.name));
+    expect(validateToolParams("mouse_click", { x: 10, y: 20 })).toMatchObject({
+      ok: true,
+      params: { button: "left", click_count: 1, interval_ms: 100 }
+    });
+    expect(validateToolParams("mouse_click", { x: 10 })).toMatchObject({ ok: false });
+    expect(validateToolParams("not_a_tool", {})).toMatchObject({ ok: false });
   });
 
   it("front-loads lease cleanup instructions", () => {

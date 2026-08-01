@@ -9,6 +9,7 @@ import { createMcpServer } from "./server.js";
 export interface StdioMcpOptions extends BrokerClientOptions {
   stdin?: Readable;
   stdout?: Writable;
+  onClose?: () => void;
 }
 
 /**
@@ -27,7 +28,11 @@ export async function startStdioMcp(
   );
 
   server.server.onclose = () => {
-    void client.close();
+    // EOF is deliberate, unlike a dropped broker socket. Release any
+    // terminal, transfer, and held-input state immediately instead of leaving
+    // it resumable for the transport-loss grace period.
+    void client.close({ cleanup: true });
+    options.onClose?.();
   };
   server.server.onerror = (error) => {
     process.stderr.write(`[win98-mcp] ${error.message}\n`);

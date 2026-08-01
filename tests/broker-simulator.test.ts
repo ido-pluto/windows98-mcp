@@ -65,6 +65,156 @@ describe("broker with deterministic guest", () => {
     });
   });
 
+  it("keeps broker tools available while a previously connected VM is offline", async () => {
+    const harness = await createHarness();
+    const client = await createClient(harness, "offline-state");
+    await harness.simulator.stop();
+    await waitFor(() => harness.broker.snapshot.state === "offline", 2_000);
+
+    const startedAt = Date.now();
+    const offline = await client.call("screen_capture");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(offline.result).toMatchObject({
+      ok: false,
+      code: "VM_OFFLINE",
+      retryable: true,
+      connection: {
+        state: "offline",
+        lastSeenAt: expect.any(String),
+        offlineReason: expect.any(String)
+      }
+    });
+
+    const diagnostics = await client.call("agent_diagnostics");
+    expect(diagnostics.result).toMatchObject({
+      ok: true,
+      data: { guestOnline: false, guestDiagnosticsAvailable: false }
+    });
+
+    await harness.simulator.start();
+    await waitFor(() => harness.broker.snapshot.state === "online", 5_000);
+    expect((await client.call("mouse_position")).result.ok).toBe(true);
+  });
+
+  it("resumes an MCP adapter session after its broker socket drops", async () => {
+    const harness = await createHarness();
+    const admin = await createClient(harness, "resume-admin");
+    const adapter = new TcpBrokerClient({
+      host: "127.0.0.1",
+      port: harness.config.adapterPort,
+      sessionLabel: "resume-mcp-adapter",
+      requestTimeoutMs: 5_000
+    });
+    try {
+      expect((await adapter.request("vm_status")).result.ok).toBe(true);
+      const originalSocket = (adapter as unknown as { socket?: net.Socket }).socket;
+      expect(originalSocket).toBeDefined();
+      originalSocket?.destroy();
+      await waitFor(
+        () => {
+          const current = (adapter as unknown as { socket?: net.Socket }).socket;
+          return current !== undefined && current !== originalSocket && !current.destroyed;
+        },
+        2_000
+      );
+      const resumed = await adapter.request("vm_status");
+      expect(resumed.result).toMatchObject({ ok: true, connection: { state: "online" } });
+      const sessions = await admin.call("broker_sessions");
+      expect(sessions.result.data).toMatchObject({
+        sessions: expect.arrayContaining([
+          expect.objectContaining({ sessionId: adapter.sessionId, label: "resume-mcp-adapter", connected: true })
+        ])
+      });
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("serializes a replay behind its interrupted logical-session request", async () => {
+    const harness = await createHarness();
+    const adapter = new TcpBrokerClient({
+      host: "127.0.0.1",
+      port: harness.config.adapterPort,
+      sessionLabel: "replay-serialization",
+      requestTimeoutMs: 5_000
+    });
+    type Execute = Broker["execute"];
+    const originalExecute: Execute = harness.broker.execute.bind(harness.broker);
+    let activeExecutions = 0;
+    let maximumConcurrentExecutions = 0;
+    let first = true;
+    let releaseFirst: (() => void) | undefined;
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let signalFirstExecution: (() => void) | undefined;
+    const firstExecution = new Promise<void>((resolve) => { signalFirstExecution = resolve; });
+    harness.broker.execute = async (...args: Parameters<Execute>) => {
+      activeExecutions += 1;
+      maximumConcurrentExecutions = Math.max(maximumConcurrentExecutions, activeExecutions);
+      try {
+        if (first) {
+          first = false;
+          signalFirstExecution?.();
+          await firstReleased;
+        }
+        return await originalExecute(...args);
+      } finally {
+        activeExecutions -= 1;
+      }
+    };
+    try {
+      const request = adapter.request("mouse_position");
+      await firstExecution;
+      const originalSocket = (adapter as unknown as { socket?: net.Socket }).socket;
+      originalSocket?.destroy();
+      await waitFor(() => {
+        const current = (adapter as unknown as { socket?: net.Socket }).socket;
+        return current !== undefined && current !== originalSocket && !current.destroyed;
+      }, 2_000);
+      releaseFirst?.();
+      await expect(request).resolves.toMatchObject({
+        result: { ok: true, recovery: { replayed: true, attempts: 2 } }
+      });
+      expect(maximumConcurrentExecutions).toBe(1);
+    } finally {
+      harness.broker.execute = originalExecute;
+      await adapter.close();
+    }
+  });
+
+  it("does not let an administratively disconnected TCP adapter resume", async () => {
+    const harness = await createHarness();
+    const admin = await createClient(harness, "disconnect-tcp-admin");
+    const target = new TcpBrokerClient({
+      host: "127.0.0.1",
+      port: harness.config.adapterPort,
+      sessionLabel: "disconnect-tcp-target",
+      requestTimeoutMs: 5_000
+    });
+    const restarted = new TcpBrokerClient({
+      host: "127.0.0.1",
+      port: harness.config.adapterPort,
+      sessionLabel: "disconnect-tcp-target-restarted",
+      requestTimeoutMs: 5_000
+    });
+    try {
+      expect((await target.request("vm_status")).result.ok).toBe(true);
+      expect((await admin.call("broker_disconnect_session", {
+        session_id: target.sessionId
+      })).result.ok).toBe(true);
+      await waitFor(
+        () => (target as unknown as { closed?: boolean }).closed === true,
+        2_000
+      );
+      await expect(target.request("vm_status")).rejects.toMatchObject({
+        code: "BROKER_CLIENT_CLOSED"
+      });
+      expect((await restarted.request("vm_status")).result.ok).toBe(true);
+    } finally {
+      await target.close();
+      await restarted.close();
+    }
+  });
+
   it("connects, captures a screen, and enforces exclusive ownership", async () => {
     const harness = await createHarness();
     const owner = await createClient(harness, "owner");

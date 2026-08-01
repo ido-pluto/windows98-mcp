@@ -67,6 +67,8 @@ export interface ConnectionSnapshot {
   epoch: number;
   connectedAt?: string;
   lastSeenAt?: string;
+  /** Why the last guest connection went offline, when known. */
+  offlineReason?: string;
   guestBuildId?: string;
   remoteAddress?: string;
 }
@@ -89,6 +91,8 @@ export interface ToolResult<T = unknown> {
   connection: ConnectionSnapshot;
   lease: LeaseSnapshot;
   retryable: boolean;
+  /** Present when an MCP request was replayed after adapter/broker recovery. */
+  recovery?: { replayed: boolean; attempts: number };
   remediation?: string;
   data?: T;
 }

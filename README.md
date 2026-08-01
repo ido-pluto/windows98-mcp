@@ -63,6 +63,15 @@ The guest retries its outbound connection every two seconds. Guest-dependent
 MCP calls wait up to five seconds for it to reconnect, then return
 `GUEST_CONNECT_TIMEOUT`. Status and capability calls return immediately.
 
+The MCP stdio server remains available if the VM is powered off or its guest
+agent disconnects. After a previously connected VM goes offline, guest tools
+return retryable `VM_OFFLINE` results immediately; start the VM again and the
+same Codex task resumes normal control when the guest reconnects. The adapter
+also resumes short broker connection losses using its original session ID.
+Interrupted tool calls are replayed automatically in order and may report
+`recovery.replayed`; this is at-least-once behavior, so a lost acknowledgement
+can duplicate a click, command, or write.
+
 The verified development host-only setup uses host `192.168.60.1` and guest
 `192.168.60.128`; edit the guest INI for your own adapter address.
 
@@ -130,6 +139,81 @@ machine running `npx windows98-mcp`—for example, the Mac client—not on the
 remote Windows broker. The transfer itself is sent through the broker-control
 connection in 64 KiB CRC32-checked chunks, with SHA-256 verification and
 resumable partial files.
+
+### CLI control without MCP
+
+Agents that only have terminal access can invoke the same operations directly:
+
+```powershell
+# Inspect all operations and their exact JSON parameter schemas.
+npx windows98-mcp tools
+
+# Run one self-contained operation. Output is one JSON result on stdout.
+npx windows98-mcp call mouse_click --params '{"x":120,"y":80}'
+npx windows98-mcp call screen_capture --params '{}' --image-out screen.png
+```
+
+For terminal sessions, held input, or a multi-step workflow, keep one session
+open with JSON Lines:
+
+```text
+{"id":"1","method":"shell_start","params":{"command":"COMMAND.COM"}}
+{"id":"2","method":"shell_write","params":{"session_id":"1","text":"dir\r\n"}}
+{"id":"3","method":"shell_read","params":{"session_id":"1","after_cursor":0,"wait_ms":500}}
+```
+
+Pipe those lines into `npx windows98-mcp rpc`; each response has the same ID.
+`call` cleans up its temporary session automatically, while `rpc` cleans up
+when stdin closes. Files and directories use the CLI computer's filesystem,
+even when its broker is remote.
+
+#### CLI operational reference
+
+All commands below use the exact MCP method name and JSON schema shown by
+`npx windows98-mcp tools`. Use `call <method> --params '<JSON>'` for a single
+operation, or send the same method/params through `rpc` for a persistent
+workflow.
+
+| Group | Methods |
+| --- | --- |
+| Status, recovery, lease | `vm_status`, `vm_capabilities`, `agent_diagnostics`, `vm_lock`, `vm_wait`, `vm_unlock` |
+| Message and screen | `show_message`, `screen_capture`, `window_capture` |
+| Mouse | `mouse_move`, `mouse_click`, `mouse_down`, `mouse_up`, `mouse_drag`, `mouse_scroll`, `mouse_position`, `mouse_release_all` |
+| Keyboard | `keyboard_type`, `keyboard_key`, `keyboard_hotkey`, `keyboard_keycode`, `keyboard_release_all`, `input_batch` |
+| Clipboard and windows | `clipboard_get`, `clipboard_set`, `window_list`, `window_focus`, `window_close` |
+| Shell and terminal | `shell_exec`, `shell_start`, `shell_read`, `shell_write`, `shell_terminate`, `shell_close` |
+| Processes | `process_list`, `process_wait`, `process_kill` |
+| Filesystem | `fs_drives`, `fs_stat`, `fs_list`, `fs_mkdir`, `fs_move`, `fs_delete` |
+| Transfers | `file_push`, `file_pull`, `directory_push`, `directory_pull` |
+| System | `system_info`, `system_reboot`, `system_shutdown` |
+
+Common one-shot calls:
+
+```powershell
+npx windows98-mcp call vm_status --params '{}'
+npx windows98-mcp call mouse_move --params '{"x":320,"y":200,"duration_ms":150}'
+npx windows98-mcp call keyboard_hotkey --params '{"keys":["CTRL","S"]}'
+npx windows98-mcp call shell_exec --params '{"command":"dir C:\\","timeout_ms":30000}'
+npx windows98-mcp call fs_list --params '{"path":"C:\\MCPTEST","recursive":false}'
+npx windows98-mcp call file_push --params '{"host_path":"C:\\work\\input.txt","guest_path":"C:\\MCPTEST\\input.txt"}'
+npx windows98-mcp call directory_pull --params '{"guest_path":"C:\\MCPTEST","host_path":"C:\\work\\mcp-test"}'
+```
+
+Persistent RPC rules:
+
+- Every input line must contain `id`, `method`, and an object `params`.
+- Responses use `{"kind":"response","id":...,"result":...}`. Transfers
+  additionally emit `{"kind":"progress",...}` lines.
+- Use RPC for `shell_start`/`shell_read`/`shell_write`/`shell_close`,
+  `mouse_down`, and low-level keyboard `action:"down"`; `call` deliberately
+  rejects these stateful operations to prevent stranded input or terminals.
+- End with `vm_unlock`; closing stdin also performs forced cleanup.
+
+Target a remote broker without a proxy:
+
+```powershell
+npx windows98-mcp call vm_status --params '{}' --broker-host 100.79.57.62 --broker-port 9899
+```
 
 ## MCP tools
 
