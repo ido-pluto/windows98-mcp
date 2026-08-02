@@ -4,11 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BUILD_ID "win98sup-0.1.0"
+#define BUILD_ID "win98sup-0.2.0"
 #define ID_EXIT 2001
 #define SUP_TIMER 1
 #define RESTART_DELAY_MS 2000UL
-#define DIALOG_CLOSE_GRACE_MS 5000UL
+#define FAULT_EXIT_TIMEOUT_MS 5000UL
 
 static char g_dir[MAX_PATH];
 static char g_agent[MAX_PATH];
@@ -19,8 +19,9 @@ static int g_child_running;
 static int g_stopping;
 static unsigned long g_restart_count;
 static unsigned long g_restart_due;
-static unsigned long g_fault_deadline;
+static unsigned long g_fault_terminate_due;
 static int g_fault_test;
+static int g_fault_dialog_seen;
 static HWND g_status;
 static HWND g_exit;
 
@@ -42,31 +43,52 @@ static int child_window_cb(HWND window, LPARAM param) {
     if(pid==(DWORD)param && IsWindowVisible(window)){PostMessageA(window,WM_CLOSE,0,0);return FALSE;}
     return TRUE;
 }
+typedef struct {
+    int matched;
+    HWND close_button;
+} FAULT_DIALOG;
+
 static int fault_text_cb(HWND child, LPARAM param) {
-    char text[512]; int *matched=(int*)param;
+    char text[512],cls[64]; FAULT_DIALOG *dialog=(FAULT_DIALOG*)param;
     GetWindowTextA(child,text,sizeof(text));
-    if(strstr(text,"illegal operation")||strstr(text,"Illegal Operation")||strstr(text,"invalid page fault")||strstr(text,"Invalid Page Fault")){*matched=1;return FALSE;}
+    if(strstr(text,"illegal operation")||strstr(text,"Illegal Operation")||strstr(text,"invalid page fault")||strstr(text,"Invalid Page Fault"))dialog->matched=1;
+    GetClassNameA(child,cls,sizeof(cls));
+    if(!strcmp(cls,"Button")&&(!strcmp(text,"Close")||!strcmp(text,"&Close")))dialog->close_button=child;
     return TRUE;
 }
 static int close_fault_dialog_cb(HWND window, LPARAM param) {
-    char title[128],cls[64]; int matched=0;
+    char title[128],cls[64]; FAULT_DIALOG dialog;
     (void)param;
     if(!IsWindowVisible(window))return TRUE;
     GetClassNameA(window,cls,sizeof(cls)); if(strcmp(cls,"#32770"))return TRUE;
     GetWindowTextA(window,title,sizeof(title));
     if(!strstr(title,"WIN98CTL")&&!strstr(title,"Win98ctl"))return TRUE;
-    EnumChildWindows(window,(WNDENUMPROC)fault_text_cb,(LPARAM)&matched);
-    if(matched){PostMessageA(window,WM_CLOSE,0,0);log_line("closed confirmed WIN98CTL fault dialog");return FALSE;}
+    memset(&dialog,0,sizeof(dialog));EnumChildWindows(window,(WNDENUMPROC)fault_text_cb,(LPARAM)&dialog);
+    if(dialog.matched){
+        if(!g_fault_dialog_seen){
+            g_fault_dialog_seen=1;
+            g_fault_terminate_due=GetTickCount()+FAULT_EXIT_TIMEOUT_MS;
+            set_status("WIN98CTL crash dialog detected; closing...");
+            log_line("detected confirmed WIN98CTL fault dialog; closing it");
+        }
+        if(dialog.close_button)PostMessageA(dialog.close_button,BM_CLICK,0,0);
+        else PostMessageA(window,WM_CLOSE,0,0);
+        return FALSE;
+    }
     return TRUE;
 }
-static void close_confirmed_fault_dialog(void) { EnumWindows((WNDENUMPROC)close_fault_dialog_cb,0); }
+static int close_confirmed_fault_dialog(void) {
+    int was_seen=g_fault_dialog_seen;
+    EnumWindows((WNDENUMPROC)close_fault_dialog_cb,0);
+    return g_fault_dialog_seen&&!was_seen;
+}
 static int start_agent(void) {
     STARTUPINFOA si; char command[MAX_PATH+32];
     if(GetFileAttributesA(g_agent)==0xffffffffUL){set_status("WIN98CTL.EXE is missing");log_line("WIN98CTL.EXE is missing; retrying");return 0;}
     memset(&si,0,sizeof(si)); memset(&g_child,0,sizeof(g_child)); si.cb=sizeof(si);
     _snprintf(command,sizeof(command),"\"%s\" --supervised%s",g_agent,g_fault_test?" --fault-test":""); command[sizeof(command)-1]=0;
     if(!CreateProcessA(0,command,0,0,FALSE,0,0,g_dir,&si,&g_child)){char line[160];_snprintf(line,sizeof(line),"CreateProcessA failed (error %lu)",(unsigned long)GetLastError());line[sizeof(line)-1]=0;log_line(line);set_status("Could not start WIN98CTL; retrying");return 0;}
-    g_child_running=1;g_fault_deadline=0;g_restart_count++;g_fault_test=0;set_status("WIN98CTL running");log_line("started WIN98CTL supervised child");return 1;
+    g_child_running=1;g_fault_terminate_due=0;g_fault_dialog_seen=0;g_restart_count++;g_fault_test=0;set_status("WIN98CTL running");log_line("started WIN98CTL supervised child");return 1;
 }
 static void stop_child(void) {
     if(!g_child_running)return;
@@ -76,13 +98,22 @@ static void stop_child(void) {
 }
 static void inspect_child(void) {
     DWORD exit_code=0; unsigned long now=GetTickCount(); char line[160];
+    /* Windows 98 keeps a faulting program alive until the illegal-operation
+       dialog is dismissed. Poll while the child is still alive. */
+    if(g_child_running){
+        close_confirmed_fault_dialog();
+        if(g_fault_terminate_due&&(long)(now-g_fault_terminate_due)>=0){
+            log_line("confirmed WIN98CTL fault dialog did not end child; forcing termination");
+            TerminateProcess(g_child.hProcess,1);
+            g_fault_terminate_due=0;
+        }
+    }
     if(g_child_running&&WaitForSingleObject(g_child.hProcess,0)==WAIT_OBJECT_0){
-        GetExitCodeProcess(g_child.hProcess,&exit_code);CloseHandle(g_child.hProcess);CloseHandle(g_child.hThread);memset(&g_child,0,sizeof(g_child));g_child_running=0;
-        _snprintf(line,sizeof(line),"WIN98CTL exited unexpectedly (exit code %lu); restart scheduled",(unsigned long)exit_code);line[sizeof(line)-1]=0;log_line(line);write_state("WIN98CTL exited",exit_code);set_status("WIN98CTL stopped; recovering");g_restart_due=now+RESTART_DELAY_MS;g_fault_deadline=now+DIALOG_CLOSE_GRACE_MS;
+        GetExitCodeProcess(g_child.hProcess,&exit_code);CloseHandle(g_child.hProcess);CloseHandle(g_child.hThread);memset(&g_child,0,sizeof(g_child));g_child_running=0;g_fault_terminate_due=0;
+        _snprintf(line,sizeof(line),"WIN98CTL exited unexpectedly (exit code %lu); restart scheduled",(unsigned long)exit_code);line[sizeof(line)-1]=0;log_line(line);write_state("WIN98CTL exited",exit_code);set_status("WIN98CTL stopped; recovering");g_restart_due=now+RESTART_DELAY_MS;
     }
     if(g_stopping)return;
-    if(g_fault_deadline){close_confirmed_fault_dialog();if((long)(now-g_fault_deadline)>=0)g_fault_deadline=0;}
-    if(!g_child_running&&g_restart_due&&(long)(now-g_restart_due)>=0){g_restart_due=now+RESTART_DELAY_MS;if(start_agent())g_restart_due=0;}
+    if(!g_child_running&&g_restart_due&&(long)(now-g_restart_due)>=0){g_restart_due=now+RESTART_DELAY_MS;log_line("restart delay elapsed; starting WIN98CTL");if(start_agent())g_restart_due=0;}
 }
 static int install_startup(void) {
     HKEY key; char exe[MAX_PATH],value[MAX_PATH+3]; LONG r;

@@ -17,8 +17,11 @@ Run UNINSTALL.BAT to stop the agent and supervisor and remove their current
 user startup entries. It deliberately keeps this folder and its logs.
 
 The agent retries the outbound host connection every two seconds forever. The
-supervisor retries an unexpectedly closed agent every two seconds forever. Use
-the supervisor window's Exit supervisor button for an intentional stop.
+supervisor checks every 250 ms for a confirmed WIN98CTL illegal-operation
+dialog while the agent is still alive, closes it, then restarts the agent after
+two seconds. If that confirmed dialog does not end the child within five
+seconds, the supervisor terminates the child before restarting it. Use the
+supervisor window's Exit supervisor button for an intentional stop.
 
 IMPORTANT
 ---------
