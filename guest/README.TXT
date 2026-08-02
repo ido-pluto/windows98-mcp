@@ -16,12 +16,12 @@ UNINSTALL
 Run UNINSTALL.BAT to stop the agent and supervisor and remove their current
 user startup entries. It deliberately keeps this folder and its logs.
 
-The agent retries the outbound host connection every two seconds forever. The
-supervisor checks every 250 ms for a confirmed WIN98CTL illegal-operation
-dialog while the agent is still alive, closes it, then restarts the agent after
-two seconds. If that confirmed dialog does not end the child within five
-seconds, the supervisor terminates the child before restarting it. Use the
-supervisor window's Exit supervisor button for an intentional stop.
+The agent retries the outbound host connection every two seconds forever. It
+also writes a local PID-bound heartbeat every two seconds from a separate
+thread. The supervisor checks that heartbeat every 250 ms and restarts only
+its owned child when the heartbeat is missing or older than eight seconds.
+Network or broker outages do not trigger this watchdog. Use the supervisor
+window's Exit supervisor button for an intentional stop.
 
 IMPORTANT
 ---------
@@ -31,12 +31,13 @@ an untrusted or public network.
 
 FILES TO RETURN AFTER A FAILURE
 -------------------------------
-Copy SELFTEST.TXT, MCPAGENT.LOG, MCPCRASH.LOG and MCPSUPERVISOR.LOG back to the
-host. MCPAGENT.LOG is bounded to 256 KiB; the prior generation is MCPAGENT.OLD.
-MCPCRASH.LOG records the exception and last in-flight request when the agent
-faults. MCPSUPERVISOR.LOG records restart and confirmed fault-dialog cleanup.
-For a one-time recovery check only, run WIN98SUP.EXE --fault-test. It launches
-one intentionally crashing child, then returns to a normal supervised agent.
+Copy SELFTEST.TXT, MCPAGENT.LOG, MCPCRASH.LOG, MCPSUPERVISOR.LOG and
+MCPSUPERVISOR.TXT back to the host. MCPAGENT.LOG is bounded to 256 KiB; the
+prior generation is MCPAGENT.OLD. MCPCRASH.LOG records the exception and last
+in-flight request when the agent faults. The supervisor state records heartbeat
+age, sequence, and restart reason. For a one-time watchdog recovery check, run
+WIN98SUP.EXE --heartbeat-test. It launches one child that withholds heartbeat,
+terminates it after eight seconds, then returns to a normal supervised agent.
 
 OPERATION NOTES
 ---------------

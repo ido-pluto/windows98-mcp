@@ -44,6 +44,7 @@ jobs:
           if ($result.ExitCode -ne 0) { throw "WIN98CTL self-test failed with exit code $($result.ExitCode)" }
           $supervisor = Start-Process -FilePath '.\WIN98SUP.EXE' -ArgumentList '--self-test' -Wait -PassThru
           if ($supervisor.ExitCode -ne 0) { throw "WIN98SUP self-test failed with exit code $($supervisor.ExitCode)" }
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts\test-supervisor-heartbeat.ps1') -ProbeDirectory $probe
             Get-Content SELFTEST.TXT
             Select-String -Path SELFTEST.TXT -Pattern 'Target compatibility: PASS', 'Result: PASS' | Out-Host
           } finally { Pop-Location }

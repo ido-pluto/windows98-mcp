@@ -42,9 +42,9 @@ do not provide security.
 2. Edit `WIN98CTL.INI` directly. Set `host` to the host-only adapter IPv4
    address visible from Windows 98 and choose a TCP `port` (default `9898`).
 3. Copy the complete folder to `C:\WIN98CTL` on Windows 98 or Windows 10. Run `RUNTEST.BAT`,
-then start `WIN98SUP.EXE`. It owns `WIN98CTL.EXE`, detects and closes confirmed
-Windows 98 illegal-operation dialogs while the faulted child is still alive,
-then restarts it after crashes,
+then start `WIN98SUP.EXE`. It owns `WIN98CTL.EXE`; the agent writes a local,
+PID-bound heartbeat every two seconds from a dedicated thread, and the
+supervisor restarts its child only if that heartbeat is stale for eight seconds,
    and is the program installed to the current user's login Run key.
    Run `UNINSTALL.BAT` from the guest folder to stop both processes and remove
    their current-user startup registration; it leaves logs and files in place.

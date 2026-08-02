@@ -51,7 +51,7 @@ jobs:
         run: |
           $probe = Join-Path $env:RUNNER_TEMP 'win98ctl-modern-windows'
           New-Item -ItemType Directory -Force -Path $probe | Out-Null
-          Copy-Item guest/dist/WIN98CTL.EXE,guest/WIN98CTL.INI -Destination $probe
+          Copy-Item guest/dist/WIN98CTL.EXE,guest/dist/WIN98SUP.EXE,guest/WIN98CTL.INI -Destination $probe
           Push-Location $probe
           try {
             # WIN98CTL is a GUI-subsystem executable. PowerShell does not
@@ -60,6 +60,7 @@ jobs:
             # process exit code on every Windows runner image.
             $selfTest = Start-Process -FilePath .\WIN98CTL.EXE -ArgumentList '--self-test' -WorkingDirectory $probe -PassThru -Wait
             if ($selfTest.ExitCode -ne 0) { throw "WIN98CTL self-test failed with exit code $($selfTest.ExitCode)" }
+            & (Join-Path $env:GITHUB_WORKSPACE 'scripts\test-supervisor-heartbeat.ps1') -ProbeDirectory $probe
             Get-Content SELFTEST.TXT
             Select-String -Path SELFTEST.TXT -Pattern 'Target compatibility: PASS', 'Result: PASS' | Out-Host
           } finally { Pop-Location }
