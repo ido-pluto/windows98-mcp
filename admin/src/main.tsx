@@ -13,6 +13,8 @@ type GuestEntry = { name: string; isDirectory: boolean; size?: number };
 type AgentSession = { sessionId: string; label: string; connectedAt: string; current: boolean; holdsLease: boolean; resources: string[] };
 type PickerMode = "upload-destination" | "download-file" | "download-directory";
 type TransferProgress = { direction: string; files: number; directories: number; bytes: number; chunks: number; totalBytes?: number; totalFiles?: number; currentPath?: string; startedAt: number };
+type QemuProfile = "win98" | "winxp" | "win10" | "generic";
+type QemuVm = { id: string; name?: string; profile?: string; runtime?: { running?: boolean; desiredState?: string; pid?: number }; guestTcp?: { host?: string; note?: string } };
 
 const defaultSettings: Settings = { port: 9898, brokerHost: "127.0.0.1", brokerPort: 9899, lockingEnabled: false, upstreamEnabled: false, upstreamHost: "", upstreamPort: 9898 };
 const asText = (value: unknown) => JSON.stringify(value, null, 2);
@@ -46,6 +48,12 @@ function App() {
   const [pickerMode, setPickerMode] = useState<PickerMode>();
   const [pickerPath, setPickerPath] = useState("C:\\");
   const [pickerEntries, setPickerEntries] = useState<GuestEntry[]>([]);
+  const [qemuVms, setQemuVms] = useState<QemuVm[]>([]);
+  const [selectedQemuVm, setSelectedQemuVm] = useState("");
+  const [qemuStatus, setQemuStatus] = useState<QemuVm>();
+  const [qemuName, setQemuName] = useState("");
+  const [qemuDiskPath, setQemuDiskPath] = useState("");
+  const [qemuProfile, setQemuProfile] = useState<QemuProfile>("win98");
 
   const refresh = useCallback(async () => {
     try {
@@ -69,16 +77,30 @@ function App() {
     } catch { /* The broker may still be starting. */ }
   }, []);
 
+  const refreshQemuVms = useCallback(async (requestedId?: string) => {
+    try {
+      const result = await request<{ vms?: QemuVm[] }>("qemu_vm_list");
+      const vms = result.vms ?? [];
+      setQemuVms(vms);
+      const id = requestedId ?? (vms.some((vm) => vm.id === selectedQemuVm) ? selectedQemuVm : vms[0]?.id ?? "");
+      setSelectedQemuVm(id);
+      if (id) {
+        const statusResult = await request<{ vm?: QemuVm }>("qemu_vm_status", { vm_id: id });
+        setQemuStatus(statusResult.vm);
+      } else setQemuStatus(undefined);
+    } catch (error) { setNotice(`QEMU: ${error instanceof Error ? error.message : String(error)}`); }
+  }, [selectedQemuVm]);
+
   useEffect(() => {
     void (async () => {
       const saved = await invoke<Settings>("get_settings");
       setSettings(saved);
       await invoke("start_broker", { settings: saved });
-      await Promise.all([refresh(), refreshAddresses()]);
+      await Promise.all([refresh(), refreshAddresses(), refreshQemuVms()]);
     })();
-    const timer = window.setInterval(() => { void refresh(); }, 2000);
+    const timer = window.setInterval(() => { void refresh(); void refreshQemuVms(); }, 2000);
     return () => window.clearInterval(timer);
-  }, [refresh, refreshAddresses]);
+  }, [refresh, refreshAddresses, refreshQemuVms]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -163,6 +185,42 @@ function App() {
   async function capture() { try { const result = await requestWithImage("screen_capture"); const data = result.image?.data; if (!data) throw new Error("The broker did not return screenshot data."); setShot(`data:image/png;base64,${data}`); setNotice("Screenshot captured."); } catch (error) { setNotice(String(error)); } finally { await releaseVm(); } }
   async function saveShot() { if (!shot) return; const path = await save({ defaultPath: "win98-screenshot.png", filters: [{ name: "PNG", extensions: ["png"] }] }); if (path) { await invoke("save_base64_png", { path, dataUrl: shot }); setNotice(`Saved ${path}`); } }
   async function refreshDiagnostics() { try { setDiagnostics(await agentDiagnostics()); setNotice("Recovery diagnostics refreshed."); } catch (error) { setNotice(String(error)); } }
+  async function selectQemuVm(id: string) {
+    try {
+      await request("qemu_vm_select", { vm_id: id });
+      setSelectedQemuVm(id);
+      await refreshQemuVms(id);
+      setNotice(`Selected QEMU VM ${id}.`);
+    } catch (error) { setNotice(`QEMU: ${String(error)}`); }
+  }
+  async function createQemuVm() {
+    if (!qemuName.trim() || !qemuDiskPath.trim()) { setNotice("Set a QEMU VM name and a broker-host disk path."); return; }
+    try {
+      const created = await request<{ vm?: QemuVm }>("qemu_vm_create", { name: qemuName.trim(), disk_path: qemuDiskPath.trim(), profile: qemuProfile });
+      setQemuName(""); setQemuDiskPath("");
+      await refreshQemuVms(created.vm?.id);
+      setNotice("Managed QEMU VM created.");
+    } catch (error) { setNotice(`QEMU: ${String(error)}`); }
+  }
+  async function qemuAction(method: "qemu_vm_start" | "qemu_vm_shutdown" | "qemu_vm_restart" | "qemu_vm_force_stop" | "qemu_vm_delete") {
+    if (!selectedQemuVm) return;
+    if ((method === "qemu_vm_force_stop" || method === "qemu_vm_delete") && !window.confirm(`${method === "qemu_vm_delete" ? "Move" : "Force-stop"} ${selectedQemuVm}?`)) return;
+    try {
+      await request(method, { vm_id: selectedQemuVm, ...(method === "qemu_vm_delete" ? { force: true } : {}) });
+      if (method === "qemu_vm_delete") { setSelectedQemuVm(""); setQemuStatus(undefined); }
+      await refreshQemuVms(method === "qemu_vm_delete" ? undefined : selectedQemuVm);
+      setNotice(`QEMU operation completed: ${method.replace("qemu_vm_", "")}.`);
+    } catch (error) { setNotice(`QEMU: ${String(error)}`); }
+  }
+  async function captureQemu() {
+    if (!selectedQemuVm) return;
+    try {
+      const result = await requestWithImage("qemu_screen_capture", { vm_id: selectedQemuVm });
+      if (!result.image?.data) throw new Error("The broker did not return QEMU screenshot data.");
+      setShot(`data:${result.image.mimeType};base64,${result.image.data}`);
+      setNotice("QEMU screenshot captured.");
+    } catch (error) { setNotice(`QEMU: ${String(error)}`); }
+  }
 
   const transferRate = transferProgress && transferProgress.bytes > 0 ? transferProgress.bytes / Math.max((Date.now() - transferProgress.startedAt) / 1000, 0.001) : 0;
   const eta = transferProgress?.totalBytes !== undefined && transferRate > 0 ? Math.max(0, transferProgress.totalBytes - transferProgress.bytes) / transferRate : undefined;
@@ -172,6 +230,7 @@ function App() {
     <fieldset><legend>Broker and VM connection</legend><div className="form-grid"><label>Broker host / IP <input value={settings.brokerHost} onChange={(e) => setSettings({ ...settings, brokerHost: e.target.value })} placeholder="127.0.0.1" /></label><label>Broker control port <input type="number" min="1" max="65535" value={settings.brokerPort} onChange={(e) => setSettings({ ...settings, brokerPort: Number(e.target.value) })} /></label><label>Guest listener port <input type="number" min="1" max="65535" value={settings.port} onChange={(e) => setSettings({ ...settings, port: Number(e.target.value) })} /></label><button disabled={!!shellId || transferActive} onClick={() => void applySettings()}>Apply</button><button onClick={() => void testConnection().then(setConnection).catch((e) => setNotice(String(e)))}>Wait / test</button><label className="check"><input type="checkbox" checked={settings.lockingEnabled} onChange={(e) => setSettings({ ...settings, lockingEnabled: e.target.checked })} /> Exclusive lock agents (off by default)</label><label className="check"><input type="checkbox" checked={settings.upstreamEnabled} onChange={(e) => setSettings({ ...settings, upstreamEnabled: e.target.checked })} /> Proxy upward to remote broker</label><label>Remote broker IP <input disabled={!settings.upstreamEnabled} value={settings.upstreamHost} onChange={(e) => setSettings({ ...settings, upstreamHost: e.target.value })} placeholder="192.168.1.50" /></label><label>Remote broker port <input disabled={!settings.upstreamEnabled} type="number" min="1" max="65535" value={settings.upstreamPort} onChange={(e) => setSettings({ ...settings, upstreamPort: Number(e.target.value) })} /></label></div><dl><dt>Broker endpoint</dt><dd>{settings.brokerHost}:{settings.brokerPort}</dd><dt>VM address</dt><dd>{connection?.connection.remoteAddress ?? "not connected"}</dd><dt>Build</dt><dd>{connection?.connection.guestBuildId ?? "—"}</dd><dt>Exclusive locking</dt><dd>{connection?.lease?.lockingEnabled === false ? "Disabled — FIFO guest queue is active; input may collide" : "Enabled"}</dd></dl></fieldset>
     <fieldset><legend>Connected agents</legend><p>Disconnecting an agent closes its MCP/admin connection. In exclusive mode, an owner is sanitized and its lease is released automatically.</p><div className="agent-list">{agentSessions.length ? agentSessions.map((agent) => <div className="agent" key={agent.sessionId}><span><b>{agent.label}</b>{agent.current ? " (this admin)" : ""}{agent.holdsLease ? " — holds VM lease" : ""}<small>{agent.resources.length ? ` Resources: ${agent.resources.join(", ")}` : " No active resources"}</small></span><button disabled={agent.current} onClick={() => void disconnectAgent(agent)}>Disconnect</button></div>) : <span>No connected agents.</span>}</div></fieldset>
     <fieldset><legend>Host IP for VMware / QEMU</legend><div className="ip-list">{addresses.length ? addresses.map((address) => <label key={`${address.name}-${address.address}`} className="radio"><input type="radio" checked={selectedAddress === address.address} onChange={() => setSelectedAddress(address.address)} /> <b>{address.address}</b> — {address.name}{address.virtual ? " (virtual adapter)" : ""}</label>) : <span>No active IPv4 address found.</span>}</div><div className="ini">host={selectedAddress || "<select an address>"}{"\n"}port={settings.port}</div></fieldset>
+<fieldset><legend>QEMU VMs</legend><div className="qemu-grid"><label>Managed VM<select value={selectedQemuVm} onChange={(e) => void selectQemuVm(e.target.value)}><option value="">No managed VM</option>{qemuVms.map((vm) => <option key={vm.id} value={vm.id}>{vm.name ?? vm.id} ({vm.profile ?? "generic"})</option>)}</select></label><button onClick={() => void refreshQemuVms(selectedQemuVm || undefined)}>Refresh</button><label>New VM name<input value={qemuName} onChange={(e) => setQemuName(e.target.value)} placeholder="Windows 98" /></label><label>Broker-host qcow2 path<input value={qemuDiskPath} onChange={(e) => setQemuDiskPath(e.target.value)} placeholder="C:\\VMs\\win98.qcow2" /></label><label>Profile<select value={qemuProfile} onChange={(e) => setQemuProfile(e.target.value as QemuProfile)}><option value="win98">Windows 98</option><option value="winxp">Windows XP</option><option value="win10">Windows 10</option><option value="generic">Generic</option></select></label><button onClick={() => void createQemuVm()}>Create / import</button></div><div className="row"><button disabled={!selectedQemuVm} onClick={() => void qemuAction("qemu_vm_start")}>Start</button><button disabled={!selectedQemuVm} onClick={() => void qemuAction("qemu_vm_shutdown")}>Shutdown</button><button disabled={!selectedQemuVm} onClick={() => void qemuAction("qemu_vm_restart")}>Restart</button><button disabled={!selectedQemuVm} onClick={() => void qemuAction("qemu_vm_force_stop")}>Force stop</button><button disabled={!selectedQemuVm} onClick={() => void qemuAction("qemu_vm_delete")}>Delete</button><button disabled={!selectedQemuVm} onClick={() => void captureQemu()}>Capture QEMU screenshot</button></div>{qemuStatus ? <dl><dt>State</dt><dd>{qemuStatus.runtime?.running ? "running" : qemuStatus.runtime?.desiredState ?? "stopped"}{qemuStatus.runtime?.pid ? ` (PID ${qemuStatus.runtime.pid})` : ""}</dd><dt>Guest TCP</dt><dd>{qemuStatus.guestTcp?.host ?? "10.0.2.2"} — {qemuStatus.guestTcp?.note ?? "set this address in WIN98CTL.INI"}</dd></dl> : <p>Create or select a managed VM. Disk paths are resolved on the broker host.</p>}</fieldset>
     <fieldset><legend>Message</legend><textarea value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Message for Windows 98" /><button disabled={!guestOnline} onClick={() => void sendMessage()}>Show message</button></fieldset>
     <fieldset><legend>Remote terminal</legend><div className="row"><input value={command} onChange={(e) => setCommand(e.target.value)} aria-label="Command" /><button disabled={!guestOnline || !!shellId} onClick={() => void runCommand()}>Run</button><button disabled={!shellId} onClick={() => void stopCommand()}>Terminate</button></div><pre>{terminal || "Output will stream here."}</pre></fieldset>
     <fieldset><legend>Files and directories</legend><div className="transfer-grid"><div><b>Upload to Windows 98</b><div className="row"><input readOnly value={uploadPath} placeholder="Select a local file or folder" /><button onClick={() => void chooseUpload(false)}>File…</button><button onClick={() => void chooseUpload(true)}>Folder…</button></div><div className="row"><input value={uploadGuestPath} onChange={(e) => setUploadGuestPath(e.target.value)} placeholder="Guest destination folder" /><button disabled={!guestOnline || transferActive} onClick={() => openGuestPicker("upload-destination")}>Browse guest…</button></div><button disabled={!guestOnline || !uploadPath || transferActive} onClick={() => void transfer("push", uploadDirectory)}>Upload {uploadDirectory ? "folder" : "file"}</button></div><div><b>Download from Windows 98</b><div className="row"><input value={downloadGuestPath} onChange={(e) => setDownloadGuestPath(e.target.value)} /><button disabled={!guestOnline || transferActive} onClick={() => openGuestPicker(downloadDirectory ? "download-directory" : "download-file")}>Browse guest…</button></div><div className="row"><input readOnly value={downloadPath} placeholder="Select a local destination" /><button onClick={() => void chooseDownload(false)}>Save file…</button><button onClick={() => void chooseDownload(true)}>Folder…</button></div><button disabled={!guestOnline || !downloadPath || transferActive} onClick={() => void transfer("pull", downloadDirectory)}>Download {downloadDirectory ? "folder" : "file"}</button></div></div>{transferProgress && <div className="transfer-progress"><b>{transferProgress.direction === "host-to-guest" ? "Uploading" : "Downloading"}</b><progress max={transferProgress.totalBytes ?? undefined} value={transferProgress.totalBytes ? transferProgress.bytes : undefined} /><span>{formatBytes(transferProgress.bytes)}{transferProgress.totalBytes !== undefined ? ` / ${formatBytes(transferProgress.totalBytes)}` : ""} · {transferProgress.files}{transferProgress.totalFiles !== undefined ? ` / ${transferProgress.totalFiles}` : ""} files</span><span>{transferRate ? `${formatBytes(transferRate)}/sec${eta !== undefined ? ` · about ${formatDuration(eta)} remaining` : ""}` : "Calculating speed…"}</span><small>{transferProgress.currentPath ?? "Preparing transfer…"}</small></div>}<label className="check"><input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} /> Overwrite existing files</label></fieldset>

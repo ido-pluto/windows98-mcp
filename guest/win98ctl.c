@@ -16,11 +16,12 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.6.0"
+#define BUILD_ID "win98ctl-0.6.1"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
 #define FILE_CHUNK 65536UL
+#define MAX_TRANSFER_BYTES (300UL*1024UL*1024UL)
 #define SHELL_REPLAY_BYTES 131072UL
 #define LOG_LIMIT_BYTES 262144UL
 #define IDLE_SLEEP 20
@@ -124,6 +125,8 @@ static HANDLE agent_worker_thread;
 static HANDLE agent_heartbeat_thread;
 static CRITICAL_SECTION agent_status_lock;
 static CRITICAL_SECTION agent_socket_lock;
+static CRITICAL_SECTION agent_log_lock;
+static int agent_log_lock_initialized;
 static char agent_status_text[256]="Starting...";
 static SOCKET agent_active_socket=INVALID_SOCKET;
 static HWND agent_main_window;
@@ -158,10 +161,12 @@ static void rotate_log_if_needed(void) {
 }
 static void log_line(const char *s) {
     SYSTEMTIME t;
+    if(agent_log_lock_initialized)EnterCriticalSection(&agent_log_lock);
     GetLocalTime(&t);rotate_log_if_needed();
     if(!log_file) log_file=fopen(cfg.log_path,"a");
     if(log_file){fprintf(log_file,"%04u-%02u-%02u %02u:%02u:%02u %s\n",
       t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,s);fflush(log_file);}
+    if(agent_log_lock_initialized)LeaveCriticalSection(&agent_log_lock);
 }
 
 static int agent_stop_requested(void) {
@@ -642,9 +647,8 @@ static char *dispatch(const char*method,const char*j) {
     if(!strcmp(method,"agent_diagnostics")){
       FILE*df;char crash[512],state[512],escaped_crash[3072],escaped_state[3072];unsigned long n;
       crash[0]=state[0]=0;df=fopen(cfg.crash_path,"r");if(df){n=fread(crash,1,sizeof(crash)-1,df);crash[n]=0;fclose(df);}df=fopen(cfg.supervisor_state_path,"r");if(df){n=fread(state,1,sizeof(state)-1,df);state[n]=0;fclose(df);}
-      json_escape(crash,escaped_crash,sizeof(escaped_crash));json_escape(state,escaped_state,sizeof(escaped_state));
-      out=(char*)malloc(strlen(escaped_crash)+strlen(escaped_state)+512);if(!out)return error_result("OUT_OF_MEMORY","Diagnostics allocation failed");
-      sprintf(out,"{\"agentLogPath\":\"%s\",\"crashLogPath\":\"%s\",\"supervisorLogPath\":\"MCPSUPERVISOR.LOG\",\"supervisorState\":\"%s\",\"lastCrash\":\"%s\"}","MCPAGENT.LOG","MCPCRASH.LOG",escaped_state,escaped_crash);enc=ok_data(out);free(out);return enc;
+      json_escape(crash,escaped_crash,sizeof(escaped_crash));json_escape(state,escaped_state,sizeof(escaped_state));out=(char*)malloc(strlen(escaped_crash)+strlen(escaped_state)+300);if(!out)return error_result("OUT_OF_MEMORY","Diagnostics allocation failed");
+      sprintf(out,"{\"agentLogPath\":\"%s\",\"crashLogPath\":\"%s\",\"supervisorLogPath\":\"MCPSUPERVISOR.LOG\",\"supervisorState\":\"%s\",\"lastCrash\":\"%s\",\"transport\":\"tcp\"}","MCPAGENT.LOG","MCPCRASH.LOG",escaped_state,escaped_crash);enc=ok_data(out);free(out);return enc;
     }
     if(!strcmp(method,"show_message")){char *message=json_string_alloc(j,"message");if(!message)return string_error_result("message is required");action=post_agent_message(message);free(message);return action?ok_data("{\"accepted\":true}"):error_result("MESSAGE_UNAVAILABLE","The WIN98CTL status window is not available");}
     if(!strcmp(method,"system_reboot"))return schedule_system_exit(1,json_bool(j,"force",0),(unsigned long)json_long(j,"delay_seconds",0));
@@ -854,11 +858,11 @@ connection_end:
 static int load_config(int quiet) {
     char exe[MAX_PATH],dir[MAX_PATH];char*p;unsigned long exe_len;exe[0]=0;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(dir,exe);p=strrchr(dir,'\\');if(p)*p=0;
     if(!safe_format(cfg.ini_path,MAX_PATH,"%s\\WIN98CTL.INI",dir,0)||!safe_format(cfg.log_path,MAX_PATH,"%s\\MCPAGENT.LOG",dir,0)||!safe_format(cfg.crash_path,MAX_PATH,"%s\\MCPCRASH.LOG",dir,0)||!safe_format(cfg.supervisor_state_path,MAX_PATH,"%s\\MCPSUPERVISOR.TXT",dir,0)||!safe_format(cfg.heartbeat_path,MAX_PATH,"%s\\MCPHEARTBEAT.TXT",dir,0)){if(!quiet)MessageBoxA(0,"WIN98CTL is installed in a path that is too long.","WIN98CTL configuration error",MB_ICONERROR);return 0;}
-    GetPrivateProfileStringA("connection","host","192.168.56.1",cfg.host,sizeof(cfg.host),cfg.ini_path);cfg.port=(unsigned short)GetPrivateProfileIntA("connection","port",9898,cfg.ini_path);
+    GetPrivateProfileStringA("connection","host","10.0.2.2",cfg.host,sizeof(cfg.host),cfg.ini_path);cfg.port=(unsigned short)GetPrivateProfileIntA("connection","port",9898,cfg.ini_path);
     if(!cfg.host[0]||!cfg.port){if(!quiet)MessageBoxA(0,"Set host and port in the [connection] section of WIN98CTL.INI.","WIN98CTL configuration error",MB_ICONERROR);return 0;}return 1;
 }
 static int install_startup(void) {
-    HKEY k;char exe[MAX_PATH],sup[MAX_PATH],value[MAX_PATH+3],*slash;LONG r;unsigned long exe_len;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(sup,exe);slash=strrchr(sup,'\\');if(!slash)return 0;strcpy(slash+1,"WIN98SUP.EXE");if(GetFileAttributesA(sup)==0xffffffffUL)return 0;if(_snprintf(value,sizeof(value),"\"%s\"",sup)<0)return 0;r=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_SET_VALUE,&k);
+    HKEY k;char exe[MAX_PATH],sup[MAX_PATH],value[MAX_PATH+3],*slash;LONG r;DWORD disposition;unsigned long exe_len;exe_len=GetModuleFileNameA(0,exe,sizeof(exe));if(!exe_len||exe_len>=sizeof(exe))return 0;strcpy(sup,exe);slash=strrchr(sup,'\\');if(!slash)return 0;strcpy(slash+1,"WIN98SUP.EXE");if(GetFileAttributesA(sup)==0xffffffffUL)return 0;if(_snprintf(value,sizeof(value),"\"%s\"",sup)<0)return 0;r=RegCreateKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,0,REG_OPTION_NON_VOLATILE,KEY_SET_VALUE,0,&k,&disposition);
     if(r==ERROR_SUCCESS){RegDeleteValueA(k,"WIN98CTL");r=RegSetValueExA(k,"WIN98SUP",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(k);}return r==ERROR_SUCCESS;
 }
 static int self_test(void) {
@@ -911,10 +915,10 @@ static LRESULT CALLBACK agent_window_proc(HWND hwnd,UINT message,WPARAM wparam,L
 static HWND create_agent_window(HINSTANCE instance,int show) {
     WNDCLASSA wc;HWND hwnd;HFONT font;int x,y;char build_text[128];
     memset(&wc,0,sizeof(wc));wc.style=CS_HREDRAW|CS_VREDRAW;wc.lpfnWndProc=agent_window_proc;wc.hInstance=instance;wc.hIcon=LoadIconA(0,IDI_APPLICATION);wc.hCursor=LoadCursorA(0,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);wc.lpszClassName="WIN98CTL_STATUS_WINDOW";
-    if(!RegisterClassA(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return 0;x=(GetSystemMetrics(SM_CXSCREEN)-360)/2;y=(GetSystemMetrics(SM_CYSCREEN)-155)/2;if(x<0)x=0;if(y<0)y=0;
-    hwnd=CreateWindowA("WIN98CTL_STATUS_WINDOW","WIN98CTL",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,x,y,360,155,0,0,instance,0);if(!hwnd)return 0;agent_main_window=hwnd;font=(HFONT)GetStockObject(DEFAULT_GUI_FONT);sprintf(build_text,"Windows 98 / Windows 10 control agent - %s",BUILD_ID);
+    if(!RegisterClassA(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS)return 0;x=(GetSystemMetrics(SM_CXSCREEN)-360)/2;y=(GetSystemMetrics(SM_CYSCREEN)-125)/2;if(x<0)x=0;if(y<0)y=0;
+    hwnd=CreateWindowA("WIN98CTL_STATUS_WINDOW","WIN98CTL",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,x,y,360,150,0,0,instance,0);if(!hwnd)return 0;agent_main_window=hwnd;font=(HFONT)GetStockObject(DEFAULT_GUI_FONT);sprintf(build_text,"Windows 98 / Windows 10 control agent - %s",BUILD_ID);
     {HWND build=CreateWindowA("STATIC",build_text,WS_CHILD|WS_VISIBLE|SS_LEFT,14,14,325,18,hwnd,0,instance,0);if(build&&font)SendMessageA(build,WM_SETFONT,(WPARAM)font,TRUE);}
-    agent_status_window=CreateWindowA("STATIC","Starting...",WS_CHILD|WS_VISIBLE|SS_LEFT,14,43,325,34,hwnd,0,instance,0);agent_close_button=CreateWindowA("BUTTON","Close",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,255,86,84,26,hwnd,(HMENU)ID_CLOSE_BUTTON,instance,0);
+    agent_status_window=CreateWindowA("STATIC","Starting...",WS_CHILD|WS_VISIBLE|SS_LEFT,14,43,325,34,hwnd,0,instance,0);agent_close_button=CreateWindowA("BUTTON","Close",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,255,82,84,26,hwnd,(HMENU)ID_CLOSE_BUTTON,instance,0);
     if(agent_status_window&&font)SendMessageA(agent_status_window,WM_SETFONT,(WPARAM)font,TRUE);if(agent_close_button&&font)SendMessageA(agent_close_button,WM_SETFONT,(WPARAM)font,TRUE);ShowWindow(hwnd,show?show:SW_SHOW);UpdateWindow(hwnd);return hwnd;
 }
 
@@ -927,9 +931,9 @@ int WINAPI WinMain(HINSTANCE hi,HINSTANCE prev,LPSTR cmd,int show) {
     if(strstr(cmd,"--fault-test")){volatile int *fault=(volatile int*)0;log_line("intentional fault-test requested");*fault=1;}
     agent_heartbeat_test=strstr(cmd,"--heartbeat-test")!=0;
     mutex=CreateMutexA(0,FALSE,"WIN98CTL_AGENT_SINGLE_INSTANCE");if(!mutex)return 3;if(GetLastError()==ERROR_ALREADY_EXISTS){log_line("second instance ignored; existing agent owns the reconnect loop");MessageBoxA(0,"WIN98CTL is already running.","WIN98CTL",MB_OK|MB_ICONINFORMATION);CloseHandle(mutex);return 3;}
-    InitializeCriticalSection(&agent_status_lock);InitializeCriticalSection(&agent_socket_lock);agent_stop_event=CreateEventA(0,TRUE,FALSE,0);if(!agent_stop_event){DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 4;}
-    hwnd=create_agent_window(hi,show);if(!hwnd){CloseHandle(agent_stop_event);agent_stop_event=0;DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 5;}
+    InitializeCriticalSection(&agent_status_lock);InitializeCriticalSection(&agent_socket_lock);InitializeCriticalSection(&agent_log_lock);agent_log_lock_initialized=1;agent_stop_event=CreateEventA(0,TRUE,FALSE,0);if(!agent_stop_event){agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 4;}
+    hwnd=create_agent_window(hi,show);if(!hwnd){CloseHandle(agent_stop_event);agent_stop_event=0;agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 5;}
     agent_heartbeat_thread=CreateThread(0,0,agent_heartbeat_thread_proc,0,0,&thread_id);if(!agent_heartbeat_thread)set_agent_status("Could not start the heartbeat worker.");
     agent_worker_thread=CreateThread(0,0,agent_network_thread,0,0,&thread_id);if(!agent_worker_thread)set_agent_status("Could not start the network worker.");
-    while((message_result=GetMessageA(&message,0,0,0))>0){TranslateMessage(&message);DispatchMessageA(&message);}if(agent_stop_event)SetEvent(agent_stop_event);interrupt_agent_socket();if(agent_worker_thread){WaitForSingleObject(agent_worker_thread,20000);CloseHandle(agent_worker_thread);agent_worker_thread=0;}if(agent_heartbeat_thread){WaitForSingleObject(agent_heartbeat_thread,5000);CloseHandle(agent_heartbeat_thread);agent_heartbeat_thread=0;}if(agent_stop_event){CloseHandle(agent_stop_event);agent_stop_event=0;}DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);if(log_file){fclose(log_file);log_file=0;}return message_result<0?6:0;
+    while((message_result=GetMessageA(&message,0,0,0))>0){TranslateMessage(&message);DispatchMessageA(&message);}if(agent_stop_event)SetEvent(agent_stop_event);interrupt_agent_socket();if(agent_worker_thread){WaitForSingleObject(agent_worker_thread,20000);CloseHandle(agent_worker_thread);agent_worker_thread=0;}if(agent_heartbeat_thread){WaitForSingleObject(agent_heartbeat_thread,5000);CloseHandle(agent_heartbeat_thread);agent_heartbeat_thread=0;}if(agent_stop_event){CloseHandle(agent_stop_event);agent_stop_event=0;}DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);CloseHandle(mutex);if(log_file){fclose(log_file);log_file=0;}return message_result<0?6:0;
 }

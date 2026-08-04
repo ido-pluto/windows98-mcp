@@ -21,7 +21,8 @@ import {
 import type { GuestResponse } from "../shared/types.js";
 
 const TRANSFER_CHUNK_BYTES = 64 * 1024;
-const MAX_WIN98_FILE_BYTES = 2_147_483_647;
+/** Hard bound for one file or all file contents in one directory transfer. */
+const MAX_WIN98_TRANSFER_BYTES = 300 * 1024 * 1024;
 const CRC32_TABLE = makeCrc32Table();
 
 export const TRANSFER_METHODS = new Set([
@@ -185,6 +186,7 @@ export class TransferCoordinator {
     if (!sourceInfo.isFile()) {
       throw new Error("HOST_SOURCE_NOT_FILE");
     }
+    if (sourceInfo.size > MAX_WIN98_TRANSFER_BYTES) throw new Error("TRANSFER_TOO_LARGE_FOR_WIN98");
     const summary = { ...emptyProgress("host-to-guest", source, guestPath), totalBytes: sourceInfo.size, totalFiles: 1, currentPath: source };
     this.report(sessionId, summary);
     const result = await this.pushOneFile(
@@ -254,7 +256,9 @@ export class TransferCoordinator {
     const entries = await collectHostTree(source, () => this.assertActive(transfer));
     this.assertActive(transfer);
     const files = entries.filter((item) => !item.isDirectory);
-    const summary = { ...emptyProgress("host-to-guest", source, guestPath), totalFiles: files.length, totalBytes: files.reduce((total, entry) => total + entry.size, 0) };
+    const totalBytes = files.reduce((total, entry) => total + entry.size, 0);
+    if (totalBytes > MAX_WIN98_TRANSFER_BYTES) throw new Error("TRANSFER_TOO_LARGE_FOR_WIN98");
+    const summary = { ...emptyProgress("host-to-guest", source, guestPath), totalFiles: files.length, totalBytes };
     this.report(sessionId, summary);
     await this.guestOk(sessionId, "fs_mkdir", {
       path: guestPath,
@@ -331,7 +335,10 @@ export class TransferCoordinator {
           summary.chunks = completedChunks + chunks;
           // The current file reports its expected length. Combine it with
           // completed files instead of adding it again for every chunk.
-          if (totalBytes !== undefined) summary.totalBytes = completedBytes + totalBytes;
+          if (totalBytes !== undefined) {
+            if (completedBytes + totalBytes > MAX_WIN98_TRANSFER_BYTES) throw new Error("TRANSFER_TOO_LARGE_FOR_WIN98");
+            summary.totalBytes = completedBytes + totalBytes;
+          }
           this.report(sessionId, summary);
         }
       );
@@ -360,8 +367,8 @@ export class TransferCoordinator {
     if (!sourceInfo.isFile()) {
       throw new Error("HOST_SOURCE_NOT_FILE");
     }
-    if (sourceInfo.size > MAX_WIN98_FILE_BYTES) {
-      throw new Error("FILE_TOO_LARGE_FOR_WIN98");
+    if (sourceInfo.size > MAX_WIN98_TRANSFER_BYTES) {
+      throw new Error("TRANSFER_TOO_LARGE_FOR_WIN98");
     }
     const parent = win32.dirname(guestPath);
     if (parent !== guestPath) {
@@ -492,7 +499,7 @@ export class TransferCoordinator {
         const nextOffset = numberField(response, "nextOffset");
         const size = numberField(response, "size");
         const eof = booleanField(response, "eof");
-        if (responseOffset !== offset || size > MAX_WIN98_FILE_BYTES) {
+        if (responseOffset !== offset || size > MAX_WIN98_TRANSFER_BYTES) {
           throw new Error("TRANSFER_OFFSET_MISMATCH");
         }
         expectedSize ??= size;
@@ -778,7 +785,7 @@ async function openPullPartial(
     tempInfo?.isFile() &&
     metaInfo?.isFile() &&
     Number.isSafeInteger(tempSize) &&
-    tempSize <= MAX_WIN98_FILE_BYTES
+    tempSize <= MAX_WIN98_TRANSFER_BYTES
   ) {
     try {
       const metadata = JSON.parse(await readFile(metaPath, "utf8")) as unknown;
@@ -792,7 +799,7 @@ async function openPullPartial(
         typeof metadataSize === "number" &&
         Number.isSafeInteger(metadataSize) &&
         metadataSize >= tempSize &&
-        metadataSize <= MAX_WIN98_FILE_BYTES
+        metadataSize <= MAX_WIN98_TRANSFER_BYTES
       ) {
         return {
           file: await open(tempPath, "r+"),
@@ -917,8 +924,8 @@ async function collectHostTree(
         });
         await visit(absolutePath, relativePath);
       } else if (info.isFile()) {
-        if (info.size > MAX_WIN98_FILE_BYTES) {
-          throw new Error(`FILE_TOO_LARGE_FOR_WIN98:${absolutePath}`);
+        if (info.size > MAX_WIN98_TRANSFER_BYTES) {
+          throw new Error(`TRANSFER_TOO_LARGE_FOR_WIN98:${absolutePath}`);
         }
         entries.push({
           relativePath,

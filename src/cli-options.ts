@@ -29,6 +29,7 @@ export interface ParsedCliOptions {
   params?: string;
   paramsFile?: string;
   imageOut?: string;
+  vmId?: string;
 }
 
 const COMMANDS = new Set<string>(CLI_COMMANDS);
@@ -45,6 +46,7 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
   let params: string | undefined;
   let paramsFile: string | undefined;
   let imageOut: string | undefined;
+  let vmId: string | undefined;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
@@ -103,6 +105,18 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       configArgs.push("--state-dir", value);
       continue;
     }
+    if (option.name === "--qemu-root") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      overrides.qemuRoot = value;
+      configArgs.push("--qemu-root", value);
+      continue;
+    }
+    if (option.name === "--qemu-binary") {
+      const value = option.value ?? requireValue(argv, ++index, option.name);
+      overrides.qemuBinary = value;
+      configArgs.push("--qemu-binary", value);
+      continue;
+    }
     if (option.name === "--upstream") {
       const value = option.value ?? requireValue(argv, ++index, option.name);
       const separator = value.lastIndexOf(":");
@@ -116,7 +130,13 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
       }
       overrides.upstreamHost = host;
       overrides.upstreamPort = port;
+      overrides.upstreamEnabled = true;
       configArgs.push("--upstream", value);
+      continue;
+    }
+    if (option.name === "--no-upstream") {
+      overrides.upstreamEnabled = false;
+      configArgs.push("--no-upstream");
       continue;
     }
     if (option.name === "--transfer-request") {
@@ -133,6 +153,12 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     }
     if (option.name === "--image-out") {
       imageOut = option.value ?? requireValue(argv, ++index, option.name);
+      continue;
+    }
+    if (option.name === "--vm") {
+      vmId = option.value ?? requireValue(argv, ++index, option.name);
+      if (!vmId.trim() || vmId.startsWith("-")) throw new Error("CLI_VALUE_REQUIRED:--vm");
+      vmId = vmId.trim();
       continue;
     }
 
@@ -154,13 +180,14 @@ export function parseCliArgs(argv: string[]): ParsedCliOptions {
     commandArgs,
     configArgs,
     ...(configPath ? { configPath } : {}),
-    overrides
-    , ...(brokerHost ? { brokerHost } : {})
-    , ...(brokerPort !== undefined ? { brokerPort } : {})
-    , ...(transferRequest ? { transferRequest } : {})
-    , ...(params !== undefined ? { params } : {})
-    , ...(paramsFile ? { paramsFile } : {})
-    , ...(imageOut ? { imageOut } : {})
+    overrides,
+    ...(brokerHost ? { brokerHost } : {}),
+    ...(brokerPort !== undefined ? { brokerPort } : {}),
+    ...(transferRequest ? { transferRequest } : {}),
+    ...(params !== undefined ? { params } : {}),
+    ...(paramsFile ? { paramsFile } : {}),
+    ...(imageOut ? { imageOut } : {}),
+    ...(vmId ? { vmId } : {})
   };
 }
 

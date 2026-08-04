@@ -43,6 +43,7 @@ import {
   TransferCoordinator,
   type TransferProgress
 } from "./transfers.js";
+import { QemuManager } from "./qemu.js";
 
 interface GuestHelloMessage {
   kind: "guest_hello";
@@ -128,6 +129,7 @@ export class Broker {
   readonly artifacts: ArtifactStore;
   readonly logger: JsonlLogger;
   readonly transfers: TransferCoordinator;
+  readonly qemu: QemuManager;
 
   private localServer?: Server;
   private adapterServer?: Server;
@@ -141,6 +143,8 @@ export class Broker {
    * This avoids a replay racing an in-flight request on the old transport. */
   private readonly adapterRequestChains = new Map<string, Promise<void>>();
   private readonly openResources = new Map<string, Set<string>>();
+  /** Per-MCP/Admin selected managed QEMU VM. Selection never changes another session. */
+  private readonly selectedQemuVms = new Map<string, string>();
   private started = false;
   private stopping = false;
   private connectionEpoch = 0;
@@ -168,6 +172,11 @@ export class Broker {
       config.requestTimeoutMs,
       (sessionId, progress) => this.emitTransferProgress(sessionId, progress)
     );
+    this.qemu = new QemuManager({
+      root: config.qemuRoot ?? `${config.stateDir}/qemu`,
+      ...(config.qemuBinary ? { binary: config.qemuBinary } : {}),
+      logger: (level, event, data) => this.logger.write(level, event, data)
+    });
     this.lease.on("expired", (owner: LeaseOwner) => {
       this.logger.write("warn", "lease_expired", {
         sessionId: owner.sessionId,
@@ -211,7 +220,8 @@ export class Broker {
       mkdir(dirname(this.config.logPath), { recursive: true }),
       mkdir(this.config.artifactDir, { recursive: true }),
       this.logger.initialize(),
-      this.artifacts.initialize()
+      this.artifacts.initialize(),
+      this.qemu.initialize()
     ]);
     if (process.platform !== "win32") {
       await unlink(this.config.pipePath).catch((error: NodeJS.ErrnoException) => {
@@ -279,6 +289,7 @@ export class Broker {
       closeServer(this.adapterServer),
       closeServer(this.guestServer)
     ]);
+    await this.qemu.stop();
     if (process.platform !== "win32") {
       await unlink(this.config.pipePath).catch(() => undefined);
     }
@@ -319,6 +330,39 @@ export class Broker {
     );
     if (local) {
       return local;
+    }
+
+    if (method === "qemu_vm_select") {
+      const vmId = typeof params["vm_id"] === "string" ? params["vm_id"] : "";
+      const status = await this.qemu.execute("qemu_vm_status", { vm_id: vmId });
+      if (!status?.ok) {
+        return this.brokerResponse(requestId, this.result(sessionId, requestId, false, status?.code ?? "QEMU_VM_NOT_FOUND", status?.message ?? "Managed VM was not found.", false));
+      }
+      this.selectedQemuVms.set(sessionId, vmId);
+      return this.brokerResponse(requestId, this.result(sessionId, requestId, true, "OK", `Selected managed QEMU VM ${vmId} for this session's QEMU panel. Normal in-guest tools use the guest's outbound TCP broker connection.`, false, undefined, { vm_id: vmId, vm: status.data?.vm, guestRouting: "tcp" }));
+    }
+    if (method === "qemu_vm_unselect") {
+      this.selectedQemuVms.delete(sessionId);
+      return this.brokerResponse(requestId, this.result(sessionId, requestId, true, "OK", "Cleared this session's managed QEMU VM selection.", false));
+    }
+
+    const qemu = await this.qemu.execute(method, params);
+    if (qemu) {
+      return {
+        kind: "broker_response",
+        id: requestId,
+        result: this.result(
+          sessionId,
+          requestId,
+          qemu.ok,
+          qemu.code,
+          qemu.message,
+          false,
+          qemu.ok ? undefined : remediationForCode(qemu.code),
+          qemu.data
+        ),
+        ...(qemu.image ? { image: qemu.image } : {})
+      };
     }
 
     // Once a guest that was previously present goes away, do not make every
@@ -631,6 +675,7 @@ export class Broker {
             ...(adapter.disconnectedAt ? { disconnectedAt: adapter.disconnectedAt } : {}),
             current: adapter.id === sessionId,
             holdsLease: this.lease.currentOwner?.sessionId === adapter.id,
+            ...(this.selectedQemuVms.has(adapter.id) ? { selectedQemuVmId: this.selectedQemuVms.get(adapter.id) } : {}),
             resources: [...(this.openResources.get(adapter.id) ?? [])]
           }))
         })
@@ -1113,6 +1158,7 @@ export class Broker {
       delete adapter.cleanupTimer;
     }
     this.adapters.delete(adapter.id);
+    this.selectedQemuVms.delete(adapter.id);
     const relation = this.lease.disconnect(adapter.id);
     this.logger.write("info", "adapter_disconnected", {
       sessionId: adapter.id,

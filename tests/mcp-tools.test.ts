@@ -54,6 +54,20 @@ describe("MCP tool surface", () => {
     expect(validateToolParams("not_a_tool", {})).toMatchObject({ ok: false });
   });
 
+  it("exposes QEMU management through the same registry and rejects unknown network modes", () => {
+    const names = new Set(TOOL_DEFINITIONS.map((tool) => tool.name));
+    expect([...names]).toEqual(expect.arrayContaining([
+      "qemu_doctor",
+      "qemu_vm_create",
+      "qemu_vm_start",
+      "qemu_screen_capture",
+      "qemu_snapshot_create"
+    ]));
+    const create = requireTool("qemu_vm_create").inputSchema;
+    expect(create.safeParse({ name: "Win98", disk_path: "C:\\VMs\\win98.qcow2" }).success).toBe(true);
+    expect(create.safeParse({ name: "Win98", disk_path: "C:\\VMs\\win98.qcow2", overrides: { network: { mode: "obsolete" } } }).success).toBe(false);
+  });
+
   it("front-loads lease cleanup instructions", () => {
     expect(MCP_SERVER_INSTRUCTIONS.slice(0, 512)).toMatch(/vm_unlock/u);
     expect(MCP_SERVER_INSTRUCTIONS).toMatch(/disconnect/iu);

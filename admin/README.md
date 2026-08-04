@@ -47,11 +47,17 @@ avoid competing with the remote broker.
 Edit the shipped `WIN98CTL.INI` directly:
 
 ```ini
-host=192.168.60.1
+# QEMU user networking: stable when the disk moves to another host.
+host=10.0.2.2
 port=9898
 ```
 
 Start `WIN98CTL.EXE`; it retries every two seconds. The same x86 executable supports Windows 98 SE through Windows 10 (including WOW64). Set the same port in the admin app. The host never dials the guest.
+
+For VMware, bridged networks, and physical Windows installations, replace
+`10.0.2.2` with the broker computer's reachable IPv4 address. `127.0.0.1`
+inside the guest is the guest itself, not the QEMU host. SMB/SMB1 and shared
+folder setup are not used or required.
 
 ## Build and portable release
 

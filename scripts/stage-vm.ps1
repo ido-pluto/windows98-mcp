@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$HostAddress,
+    [string]$HostAddress = "10.0.2.2",
     [int]$Port = 9898,
     [switch]$SkipBuild,
     [string]$WatcomRoot,
@@ -57,5 +57,5 @@ $checksumLines = Get-ChildItem -LiteralPath $stage -File |
 
 Write-Host "VM drop staged at $stage"
 Write-Host "Copy required: complete out\\vm-drop package (EXE and INI were staged together)."
-Write-Host "The only required edit is WIN98CTL.INI: host=$HostAddress and port=$Port."
+Write-Host "The only required edit is WIN98CTL.INI: host=$HostAddress and port=$Port. For QEMU user networking use host=10.0.2.2."
 Write-Host "Copy the folder to Windows 98 and run RUNTEST.BAT."

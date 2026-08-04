@@ -9,6 +9,10 @@ tools. Agents can capture screens, use exact mouse and keyboard input, run and
 stream commands, manage windows and processes, use the clipboard, and transfer
 files and directories without ordinary Computer Use.
 
+The same broker can manage local QEMU VMs: create/import qcow2 machines,
+control lifecycle and snapshots, inspect QMP, and capture/input the framebuffer
+before the Windows controller starts.
+
 **[Download the Windows 98 guest](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-guest.zip)** ·
 **[Windows x64 admin](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-x64.zip)** ·
 **[Windows ARM64 admin](https://github.com/ido-pluto/windows98-mcp/releases/latest/download/windows98-mcp-admin-windows-arm64.zip)** ·
@@ -41,12 +45,13 @@ do not provide security.
 1. Download and extract the guest ZIP on the host.
 2. Edit `WIN98CTL.INI` directly. Set `host` to the host-only adapter IPv4
    address visible from Windows 98 and choose a TCP `port` (default `9898`).
-3. Copy the complete folder to `C:\WIN98CTL` on Windows 98 or Windows 10. Run `RUNTEST.BAT`,
-then start `WIN98SUP.EXE`. It owns `WIN98CTL.EXE`; the agent writes a local,
+3. Run `INSTALL.BAT` from the extracted folder or mounted ISO. It copies the
+   package to `C:\WIN98MCP` and registers `WIN98SUP.EXE` for login. Restart
+   Windows; the supervisor owns `WIN98CTL.EXE`. The agent writes a local,
 PID-bound heartbeat every two seconds from a dedicated thread, and the
 supervisor restarts its child only if that heartbeat is stale for eight seconds,
    and is the program installed to the current user's login Run key.
-   Run `UNINSTALL.BAT` from the guest folder to stop both processes and remove
+   Run `C:\WIN98MCP\UNINSTALL.BAT` to stop both processes and remove
    their current-user startup registration; it leaves logs and files in place.
 4. Download and run the Windows admin app. Set the same port in its connection
    panel. It starts the broker and shows guest status.
@@ -168,6 +173,117 @@ Pipe those lines into `npx windows98-mcp rpc`; each response has the same ID.
 `call` cleans up its temporary session automatically, while `rpc` cleans up
 when stdin closes. Files and directories use the CLI computer's filesystem,
 even when its broker is remote.
+
+### Managed QEMU VMs
+
+Use `qemu_doctor` to check the QEMU executable, `qemu_vm_create` to import a
+broker-local disk, and `qemu_vm_start` to run it. `--qemu-root` changes the
+managed VM directory; `--qemu-binary` sets the default executable. Profiles
+are `win98`, `winxp`, `win10`, and `generic`; per-VM binary paths, structured
+device/network overrides, and extra arguments remain available through the
+QEMU schemas shown by `npx windows98-mcp tools`.
+
+Every built-in profile explicitly starts with
+`kernel-irqchip=off,hpet=off,usb=off`. These compatibility flags are required
+by our Windows 98 profile on Windows, Linux, and macOS: removing them can
+cause a Windows 98 blue screen. The generated Windows 98 machine is
+`-M pc,accel=<auto-plan>,hpet=off,kernel-irqchip=off,usb=off`.
+
+`acceleration: "auto"` always includes emulation fallback: Windows x64 uses
+`whpx:tcg`, Linux x64 uses `kvm:tcg`, Intel macOS uses `hvf:tcg`, and x86
+guests on ARM hosts use `tcg`. QEMU tries the accelerators from left to right,
+so a missing or unusable hardware accelerator falls back to TCG instead of
+preventing a VM from starting. Use `qemu_doctor` to inspect the selected plan,
+or set `acceleration` to `tcg`, `whpx`, `kvm`, `hvf`, or `auto` explicitly.
+
+The `win98` profile is tuned for an unpatched Windows 98 SE guest: a Pentium
+II CPU, one vCPU, 256 MiB RAM, i440fx chipset, Cirrus VGA, local-time RTC,
+HPET disabled, IDE qcow2 disk, and an RTL8139 network adapter. Do not raise
+memory above 512 MiB without applying the relevant Windows 98 VCache
+workarounds.
+
+`profile_overrides` replaces **any** named profile component, not only disk or
+network. Give a component an ordered argument array to replace it, or `false`
+to remove it. Built-in groups include `display`, `machine`, `memory`, `cpu`,
+`audio`, `firmware`, `boot`, `devices`, `platform`, `disk`, and `network`; custom names are
+also accepted and appended before broker-owned QMP setup.
+
+```powershell
+# Replace the Win98 profile's audio and display configuration, and add USB.
+npx windows98-mcp call qemu_vm_update --params '{"vm_id":"win98","profile_overrides":{"audio":["-audiodev","sdl,id=snd0","-device","ac97,audiodev=snd0"],"display":["-display","sdl"],"usb":["-usb"]}}'
+```
+
+```powershell
+npx windows98-mcp call qemu_doctor --params '{}'
+npx windows98-mcp call qemu_vm_create --params '{"name":"Win98","disk_path":"C:\\VMs\\win98.qcow2","profile":"win98"}'
+npx windows98-mcp call qemu_vm_start --params '{"vm_id":"win98"}'
+npx windows98-mcp call qemu_screen_capture --params '{"vm_id":"win98"}' --image-out qemu.png
+npx windows98-mcp call qemu_vm_force_stop --params '{"vm_id":"win98"}'
+npx windows98-mcp call qemu_snapshot_create --params '{"vm_id":"win98","name":"clean-install"}'
+```
+
+`qemu_screen_capture`, `qemu_keyboard_*`, and `qemu_mouse_*` work through QMP
+before `WIN98CTL.EXE` is online. Deleted managed VMs go to broker trash; the
+newest three are recoverable with `qemu_vm_restore`. Each broker manages at
+most four live VMs; delete a VM before creating a fifth.
+
+Managed ISO media is kept beneath each VM's `media/` directory. Import an ISO
+from a path on the **broker host**, mount or eject it while QEMU is running,
+and set CD-ROM boot order while the VM is stopped. These operations are exposed
+identically through MCP, `call`, and `rpc`:
+
+```powershell
+npx windows98-mcp call qemu_media_push --params '{"vm_id":"win98","source_path":"C:\\ISO\\win98-mcp-guest.iso","media_id":"guest-tools"}'
+npx windows98-mcp call qemu_media_mount --params '{"vm_id":"win98","media_id":"guest-tools"}'
+npx windows98-mcp call qemu_media_list --params '{"vm_id":"win98"}'
+# Stop first, then make the mounted CD bootable on the next start.
+npx windows98-mcp call qemu_media_set_boot --params '{"vm_id":"win98","device":"cdrom"}'
+npx windows98-mcp call qemu_media_eject --params '{"vm_id":"win98"}'
+```
+
+`qemu_media_push` intentionally does not interpret a path from a remote MCP or
+CLI client. Copy the ISO to the broker host first; remote resumable media upload
+is a separate future transport feature. Likewise, `disk_path` is currently
+resolved on the broker host, not uploaded from a remote MCP/CLI client.
+
+#### QEMU prerequisites and portable guest networking
+
+Install QEMU on the machine that runs the broker; `qemu_doctor` reports the
+resolved executable and accelerator plan before a VM is created. The managed
+profile uses QEMU user networking. In that network the host is always
+`10.0.2.2` **from inside the guest**, so a QEMU Windows image can retain this
+guest configuration when moved to a different host:
+
+```ini
+[connection]
+host=10.0.2.2
+port=9898
+```
+
+`127.0.0.1` is not correct here: it is the Windows guest itself. Start the
+broker listener on the same port (9898 by default) and allow that private
+listener port through the host firewall. For VMware, bridged networking, or a
+physical Windows installation, replace `10.0.2.2` with the broker host's
+reachable IPv4 address.
+
+- **Windows:** Install a current QEMU build and enable **Windows Hypervisor
+  Platform** in Windows Features (or with
+  `DISM /Online /Enable-Feature /FeatureName:HypervisorPlatform /All`). WHPX
+  requires that Windows feature; on systems where it is unavailable, the
+  default plan automatically uses TCG. QEMU documents the supported Windows
+  versions and ARM64 requirements in its [WHPX documentation](https://www.qemu.org/docs/master/system/whpx.html).
+- **Linux:** Install the distribution's QEMU package. Hardware acceleration
+  additionally requires KVM support (`/dev/kvm`) and permission to use it,
+  commonly membership of the `kvm` group. If KVM is absent or unavailable,
+  `auto` uses TCG.
+- **macOS:** Install QEMU (for example, `brew install qemu`). Intel Macs use
+  Hypervisor.framework through HVF when available. Apple Silicon hosts run an
+  i386/x86 Windows 98 guest with TCG emulation, so it is compatible but slower.
+
+SMB, SMB1, shared-folder setup, and Windows' **SMB 1.0/CIFS File Sharing
+Support** feature are not used by this release and must not be enabled for
+windows98-mcp. The prior SMB mailbox transport was removed; guest control is
+outbound TCP only.
 
 #### CLI operational reference
 

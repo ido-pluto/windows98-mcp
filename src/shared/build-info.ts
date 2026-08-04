@@ -4,4 +4,4 @@
  * Keep this synchronized with BUILD_ID in guest/win98ctl.c when producing a
  * new guest package.
  */
-export const EXPECTED_GUEST_BUILD_ID = "win98ctl-0.6.0";
+export const EXPECTED_GUEST_BUILD_ID = "win98ctl-0.6.1";

@@ -74,6 +74,18 @@ const windowId = z
 const processId = z.number().int().min(0).max(0xffff_ffff);
 const guestPath = z.string().min(1).max(260);
 const hostPath = z.string().min(1);
+const qemuVmId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
+const qemuProfile = z.enum(["win98", "winxp", "win10", "generic"]);
+const qemuAcceleration = z.enum(["auto", "tcg", "whpx", "kvm", "hvf"]);
+const qemuOverrides = z.strictObject({
+  disk: z.strictObject({ enabled: z.boolean().optional(), interface: z.string().min(1).max(32).optional() }).optional(),
+  network: z.strictObject({ mode: z.enum(["user", "disabled", "custom"]).optional(), args: z.array(z.string().min(1).max(4096)).max(128).optional() }).optional()
+}).optional();
+/** Replace or disable any named QEMU profile component (audio, display, firmware, boot, devices, etc.). */
+const qemuProfileOverrides = z.record(
+  z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/),
+  z.union([z.literal(false), z.array(z.string().min(1).max(4096)).min(1).max(256)])
+).optional();
 
 const regionSchema = z.strictObject({
   x: coordinate,
@@ -170,6 +182,51 @@ const inputActionSchema = z.discriminatedUnion("type", [
 });
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+  {
+    name: "qemu_doctor",
+    description: "Check the local QEMU host, configured binary, managed VM root, accelerator policy, and stable guest-to-host TCP route.",
+    inputSchema: z.strictObject({ qemu_binary: z.string().min(1).optional(), profile: qemuProfile.optional(), acceleration: qemuAcceleration.optional() }),
+    annotations: readOnly
+  },
+  { name: "qemu_vm_list", description: "List broker-managed QEMU VMs and their lifecycle state.", inputSchema: empty, annotations: readOnly },
+  { name: "qemu_vm_select", description: "Record the managed QEMU VM selected in this MCP/Admin session's QEMU panel. In-guest MCP control remains the agent's outbound TCP connection.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: mutating },
+  { name: "qemu_vm_unselect", description: "Clear this session's managed QEMU VM selection.", inputSchema: empty, annotations: mutating },
+  { name: "qemu_vm_status", description: "Read one managed QEMU VM's process, QMP, and guest TCP transport state.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: readOnly },
+  {
+    name: "qemu_vm_command_preview", description: "Preview the exact managed QEMU command without changing VM state.",
+    inputSchema: z.strictObject({ vm_id: qemuVmId.optional(), name: z.string().min(1).max(128).optional(), profile: qemuProfile.optional(), acceleration: qemuAcceleration.optional(), qemu_binary: z.string().min(1).optional(), architecture: z.string().min(1).max(64).optional(), machine: z.string().min(1).max(128).optional(), memory: z.string().min(1).max(32).optional(), cpus: z.number().int().min(1).max(128).optional(), extra_args: z.array(z.string().min(1).max(4096)).max(256).optional(), overrides: qemuOverrides, profile_overrides: qemuProfileOverrides }), annotations: readOnly
+  },
+  {
+    name: "qemu_vm_create", description: "Import a broker-local disk into a new managed qcow2 QEMU VM. disk_path currently belongs to the broker host; remote-media upload is not available yet.",
+    inputSchema: z.strictObject({ vm_id: qemuVmId.optional(), name: z.string().min(1).max(128), disk_path: hostPath.optional(), profile: qemuProfile.default("win98"), acceleration: qemuAcceleration.default("auto"), qemu_binary: z.string().min(1).optional(), architecture: z.string().min(1).max(64).optional(), machine: z.string().min(1).max(128).optional(), memory: z.string().min(1).max(32).optional(), cpus: z.number().int().min(1).max(128).optional(), extra_args: z.array(z.string().min(1).max(4096)).max(256).default([]), overrides: qemuOverrides, profile_overrides: qemuProfileOverrides }), annotations: destructive
+  },
+  { name: "qemu_vm_update", description: "Update a stopped managed QEMU VM definition, including accelerator policy and any profile component.", inputSchema: z.strictObject({ vm_id: qemuVmId, name: z.string().min(1).max(128).optional(), profile: qemuProfile.optional(), acceleration: qemuAcceleration.optional(), qemu_binary: z.string().min(1).optional(), architecture: z.string().min(1).max(64).optional(), machine: z.string().min(1).max(128).optional(), memory: z.string().min(1).max(32).optional(), cpus: z.number().int().min(1).max(128).optional(), extra_args: z.array(z.string().min(1).max(4096)).max(256).optional(), overrides: qemuOverrides, profile_overrides: qemuProfileOverrides }), annotations: destructive },
+  { name: "qemu_vm_start", description: "Start a managed QEMU VM with QMP and the profile's guest TCP network.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: mutating },
+  { name: "qemu_vm_shutdown", description: "Request graceful guest shutdown, wait 40 seconds, then stop only this QEMU process if needed.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: destructive },
+  { name: "qemu_vm_restart", description: "Gracefully stop then restart a managed QEMU VM.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: destructive },
+  { name: "qemu_vm_force_stop", description: "Immediately stop a managed QEMU VM when graceful shutdown is not possible.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: destructive },
+  { name: "qemu_vm_delete", description: "Move a managed QEMU VM to recoverable broker trash; only the newest three entries are retained.", inputSchema: z.strictObject({ vm_id: qemuVmId, force: z.boolean().default(false) }), annotations: destructive },
+  { name: "qemu_vm_trash_list", description: "List recoverable deleted managed VMs.", inputSchema: empty, annotations: readOnly },
+  { name: "qemu_vm_restore", description: "Restore a managed VM from broker trash.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: destructive },
+  { name: "qemu_vm_trash_empty", description: "Permanently delete every retained QEMU trash entry.", inputSchema: empty, annotations: destructive },
+  { name: "qemu_vm_metrics", description: "Read managed QEMU process and QMP metrics.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: readOnly },
+  { name: "qemu_media_push", description: "Copy a broker-local .iso image into this VM's managed media directory. source_path is resolved on the broker host; remote media upload is not available yet.", inputSchema: z.strictObject({ vm_id: qemuVmId, source_path: hostPath, media_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/).optional() }), annotations: destructive },
+  { name: "qemu_media_list", description: "List ISO images stored in this managed VM's media directory and report which ISO is configured as mounted.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: readOnly },
+  { name: "qemu_media_mount", description: "Mount a managed ISO now when the VM is running and persist it for future starts.", inputSchema: z.strictObject({ vm_id: qemuVmId, media_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/) }), annotations: mutating },
+  { name: "qemu_media_eject", description: "Eject the managed CD-ROM now when running and persist an empty drive for future starts.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: mutating },
+  { name: "qemu_media_delete", description: "Delete an unmounted managed ISO. force=true ejects it first when it is mounted.", inputSchema: z.strictObject({ vm_id: qemuVmId, media_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/), force: z.boolean().default(false) }), annotations: destructive },
+  { name: "qemu_media_set_boot", description: "Set persistent QEMU boot order to disk, cdrom, or network. The VM must be stopped.", inputSchema: z.strictObject({ vm_id: qemuVmId, device: z.enum(["disk", "cdrom", "network"]) }), annotations: destructive },
+  { name: "qemu_snapshot_list", description: "List stopped-VM qcow2 internal snapshots.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: readOnly },
+  { name: "qemu_snapshot_create", description: "Create a named qcow2 internal disk snapshot while the VM is stopped.", inputSchema: z.strictObject({ vm_id: qemuVmId, name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/) }), annotations: destructive },
+  { name: "qemu_snapshot_restore", description: "Restore a named qcow2 internal disk snapshot while the VM is stopped.", inputSchema: z.strictObject({ vm_id: qemuVmId, name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/) }), annotations: destructive },
+  { name: "qemu_snapshot_delete", description: "Delete a named qcow2 internal disk snapshot while the VM is stopped.", inputSchema: z.strictObject({ vm_id: qemuVmId, name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/) }), annotations: destructive },
+  { name: "qemu_screen_capture", description: "Capture the QEMU framebuffer before the Windows controller has started.", inputSchema: z.strictObject({ vm_id: qemuVmId }), annotations: readOnly },
+  { name: "qemu_keyboard_key", description: "Send a QMP qcode key event before or after guest-agent startup.", inputSchema: z.strictObject({ vm_id: qemuVmId, key: z.string().min(1).max(64), action: keyAction.default("press") }), annotations: mutating },
+  { name: "qemu_keyboard_type", description: "Type basic QEMU monitor-compatible text into the active QEMU display.", inputSchema: z.strictObject({ vm_id: qemuVmId, text: z.string().min(1).max(4096) }), annotations: mutating },
+  { name: "qemu_mouse_move", description: "Send absolute QMP mouse coordinates to a running QEMU VM.", inputSchema: z.strictObject({ vm_id: qemuVmId, x: coordinate, y: coordinate }), annotations: mutating },
+  { name: "qemu_mouse_click", description: "Move then click through QMP before the Windows controller is available.", inputSchema: z.strictObject({ vm_id: qemuVmId, x: coordinate, y: coordinate, button: mouseButton.default("left") }), annotations: mutating },
+  { name: "qemu_qmp_execute", description: "Run an advanced QMP command against a managed VM's local broker-owned QMP endpoint.", inputSchema: z.strictObject({ vm_id: qemuVmId, command: z.string().min(1).max(128), arguments: z.record(z.string(), z.unknown()).default({}) }), annotations: mutating },
+  { name: "qemu_hmp_command", description: "Run an advanced HMP command through QMP human-monitor-command.", inputSchema: z.strictObject({ vm_id: qemuVmId, command: z.string().min(1).max(4096) }), annotations: mutating },
   {
     name: "vm_status",
     description:

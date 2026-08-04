@@ -3,13 +3,17 @@ WIN98CTL - WINDOWS 98 THROUGH WINDOWS 10 GUEST AGENT
 
 SETUP
 -----
-1. Edit WIN98CTL.INI. Set host to the host computer's address as visible from
-   this VM and set the matching listener port (9898 by default).
-2. Copy this complete folder to the Windows 98 or Windows 10 machine to control.
-3. Run RUNTEST.BAT, then WIN98SUP.EXE. It starts WIN98CTL.EXE and restarts it
-   after an unexpected exit.
+1. Edit WIN98CTL.INI. For a QEMU VM using the managed default user network,
+   keep host=10.0.2.2; it is QEMU's stable host gateway and remains valid when
+   the disk is moved to another computer. For VMware, bridged networking, or
+   a physical Windows machine, set host to the broker computer's reachable
+   IPv4 address. Set the matching listener port (9898 by default).
+2. Run INSTALL.BAT from this folder or the mounted release CD. It copies the
+   complete package to C:\WIN98MCP and registers WIN98SUP for login.
+3. Restart Windows. WIN98SUP starts WIN98CTL and restarts it after an
+   unexpected exit. RUNTEST.BAT in C:\WIN98MCP remains available for tests.
 4. Start the host broker or Windows admin app on the same port.
-5. Run the host smoke test. Run INSTALL.BAT only after it succeeds.
+5. Run the host smoke test.
 
 UNINSTALL
 ---------
@@ -53,6 +57,14 @@ them. Compatible BASH.EXE commands run directly; other shell commands use the
 machine's COMSPEC command processor (COMMAND.COM on Windows 98 and normally
 cmd.exe on Windows 10). The host can send show_message to display a dialog
 titled "Windows 98 Remote Control".
+
+QEMU TCP NETWORKING
+-------------------
+QEMU-managed VMs use ordinary outbound TCP only. With the default QEMU user
+network, host=10.0.2.2 reaches the broker on the physical host regardless of
+that host's actual LAN, Wi-Fi, VPN, or adapter address. Do not use 127.0.0.1:
+inside Windows it means this guest, not the QEMU host. SMB, SMB1, mailbox
+files, shared folders, and desktop network-share shortcuts are not used.
 
 CURRENT LIMITATIONS
 -------------------

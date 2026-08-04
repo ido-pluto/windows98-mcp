@@ -2,7 +2,7 @@
   "name": "windows98-mcp",
   "version": "0.0.0-development",
   "type": "module",
-  "description": "Control a Windows 98 VM through MCP with screenshots, mouse, keyboard, shell, files, windows, and exclusive leases",
+  "description": "Control Windows 98 through Windows 10 guests and managed QEMU VMs through MCP, CLI, and a broker queue",
   "bin": {
     "windows98-mcp": "./dist/src/cli.js",
     "win98-mcp": "./dist/src/cli.js"
@@ -52,6 +52,7 @@
     "windows98",
     "remote-control",
     "virtual-machine",
+    "qemu",
     "automation",
     "codex",
     "legacy-windows"

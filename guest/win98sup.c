@@ -113,9 +113,9 @@ static void inspect_child(void) {
     if(!g_child_running&&tick_due(now,g_restart_due)){g_restart_due=now+RESTART_DELAY_MS;log_line("restart delay elapsed; starting WIN98CTL");if(start_agent())g_restart_due=0;}
 }
 static int install_startup(void) {
-    HKEY key; char exe[MAX_PATH],value[MAX_PATH+3]; LONG r;
+    HKEY key; char exe[MAX_PATH],value[MAX_PATH+3]; LONG r;DWORD disposition;
     if(!GetModuleFileNameA(0,exe,sizeof(exe))||_snprintf(value,sizeof(value),"\"%s\"",exe)<0)return 0;
-    r=RegOpenKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,KEY_SET_VALUE,&key);
+    r=RegCreateKeyExA(HKEY_CURRENT_USER,"Software\\Microsoft\\Windows\\CurrentVersion\\Run",0,0,REG_OPTION_NON_VOLATILE,KEY_SET_VALUE,0,&key,&disposition);
     if(r!=ERROR_SUCCESS)return 0; RegDeleteValueA(key,"WIN98CTL");r=RegSetValueExA(key,"WIN98SUP",0,REG_SZ,(BYTE*)value,strlen(value)+1);RegCloseKey(key);return r==ERROR_SUCCESS;
 }
 static int uninstall_startup(void) {
@@ -136,7 +136,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 int WINAPI WinMain(HINSTANCE instance,HINSTANCE previous,LPSTR command,int show) {
     WNDCLASSA wc; HWND hwnd; MSG msg; char module[MAX_PATH],*slash;int uninstall_ok;
     (void)previous;
-    if(strstr(command,"--install")){MessageBoxA(0,install_startup()?"Supervisor startup registration installed.":"Supervisor startup registration failed.","WIN98SUP",MB_OK);return 0;}
+    if(strstr(command,"--install")){uninstall_ok=install_startup();MessageBoxA(0,uninstall_ok?"Supervisor startup registration installed.":"Supervisor startup registration failed.","WIN98SUP",MB_OK);return uninstall_ok?0:1;}
     if(strstr(command,"--uninstall")){uninstall_ok=uninstall_startup();MessageBoxA(0,uninstall_ok?"Supervisor startup registration removed and running supervisor asked to exit.":"Supervisor startup registration removal failed.","WIN98SUP",MB_OK);return uninstall_ok?0:1;}
     if(!GetModuleFileNameA(0,module,sizeof(module)))return 2;strcpy(g_dir,module);slash=strrchr(g_dir,'\\');if(!slash)return 2;*slash=0;
     _snprintf(g_agent,sizeof(g_agent),"%s\\WIN98CTL.EXE",g_dir);_snprintf(g_log,sizeof(g_log),"%s\\MCPSUPERVISOR.LOG",g_dir);_snprintf(g_state,sizeof(g_state),"%s\\MCPSUPERVISOR.TXT",g_dir);_snprintf(g_heartbeat,sizeof(g_heartbeat),"%s\\MCPHEARTBEAT.TXT",g_dir);

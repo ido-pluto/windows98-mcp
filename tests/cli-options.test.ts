@@ -23,6 +23,14 @@ describe("CLI options", () => {
     });
   });
 
+  it("can explicitly disable a persisted upstream relay", () => {
+    expect(parseCliArgs(["broker", "--no-upstream"])).toMatchObject({
+      command: "broker",
+      overrides: { upstreamEnabled: false },
+      configArgs: ["--no-upstream"]
+    });
+  });
+
   it("accepts the desktop sidecar's local transfer request", () => {
     expect(parseCliArgs([
       "client-transfer",

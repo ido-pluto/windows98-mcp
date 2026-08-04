@@ -23,6 +23,10 @@ export interface BrokerConfig {
   guestConnectTimeoutMs: number;
   heartbeatTimeoutMs: number;
   maxArtifactBytes: number;
+  /** Root directory for broker-owned managed QEMU VMs. */
+  qemuRoot?: string;
+  /** Optional default qemu-system binary. Individual VMs may override it. */
+  qemuBinary?: string;
 }
 
 export interface BrokerConfigFile {
@@ -31,6 +35,8 @@ export interface BrokerConfigFile {
   lockingEnabled?: boolean;
   upstreamHost?: string;
   upstreamPort?: number;
+  /** Explicitly disable a persisted upstream target for this broker instance. */
+  upstreamEnabled?: boolean;
   stateDir?: string;
   artifactDir?: string;
   logPath?: string;
@@ -40,6 +46,8 @@ export interface BrokerConfigFile {
   guestConnectTimeoutMs?: number;
   heartbeatTimeoutMs?: number;
   maxArtifactBytes?: number;
+  qemuRoot?: string;
+  qemuBinary?: string;
 }
 
 export interface LoadBrokerConfigOptions {
@@ -54,6 +62,7 @@ interface RuntimeSettings {
   brokerPort?: number;
   upstreamHost?: string;
   upstreamPort?: number;
+  upstreamEnabled?: boolean;
   lockingEnabled?: boolean;
 }
 
@@ -102,7 +111,8 @@ export async function loadBrokerConfig(
     "lockingEnabled"
   );
   const defaultStateRoot = resolve(env["LOCALAPPDATA"] ?? homedir(), "win98-mcp");
-  const configuredUpstreamHost = options.overrides?.upstreamHost ?? merged.upstreamHost ?? runtime.upstreamHost;
+  const upstreamEnabled = options.overrides?.upstreamEnabled ?? merged.upstreamEnabled ?? runtime.upstreamEnabled ?? true;
+  const configuredUpstreamHost = upstreamEnabled ? options.overrides?.upstreamHost ?? merged.upstreamHost ?? runtime.upstreamHost : undefined;
   const upstreamHost = typeof configuredUpstreamHost === "string" && configuredUpstreamHost.trim()
     ? configuredUpstreamHost.trim()
     : undefined;
@@ -175,7 +185,14 @@ export async function loadBrokerConfig(
       "maxArtifactBytes",
       1024,
       512 * 1024 * 1024
-    )
+    ),
+    qemuRoot: resolveConfiguredPath(
+      merged.qemuRoot ?? env["WIN98_MCP_QEMU_ROOT"] ?? resolve(stateDir, "qemu"),
+      cwd
+    ),
+    ...(typeof (merged.qemuBinary ?? env["WIN98_MCP_QEMU_BINARY"]) === "string" && (merged.qemuBinary ?? env["WIN98_MCP_QEMU_BINARY"])?.trim()
+      ? { qemuBinary: resolveConfiguredPath((merged.qemuBinary ?? env["WIN98_MCP_QEMU_BINARY"])!.trim(), cwd) }
+      : {})
   };
   return config;
 }

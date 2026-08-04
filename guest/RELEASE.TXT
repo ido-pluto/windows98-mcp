@@ -3,13 +3,17 @@ WIN98CTL - RELEASE DOWNLOAD
 
 This is the Windows 98 through Windows 10 guest component for windows98-mcp.
 
-1. Extract this folder and edit WIN98CTL.INI. Set host to the host-only adapter
-   address visible from the controlled Windows machine and set port to the host
-   listener port.
-2. Copy the complete folder to Windows 98 SE or Windows 10.
-3. Run RUNTEST.BAT, then WIN98SUP.EXE.
+1. Extract or mount this folder and edit WIN98CTL.INI. A QEMU VM using the
+   managed default user network should keep host=10.0.2.2: it is the stable
+   QEMU host gateway, so the disk can move to another computer without an IP
+   change. For VMware, bridged networking, or a physical Windows machine, set
+   host to the reachable IPv4 address of the broker computer. Set port to the
+   host listener port.
+2. Run INSTALL.BAT. It copies the complete package to C:\WIN98MCP and
+   registers WIN98SUP for the current user's next login.
+3. Restart Windows, then run C:\WIN98MCP\RUNTEST.BAT if diagnostics are needed.
 4. On the host, start the Windows admin app or run npx windows98-mcp.
-5. Run INSTALL.BAT only after the host smoke test passes.
+5. Run the host smoke test.
 6. Run UNINSTALL.BAT to stop the programs and remove current-user autostart.
 
 The same 32-bit WIN98CTL.EXE runs on Windows 98 SE and Windows 10 (32-bit or

@@ -259,9 +259,9 @@ async function runCall(): Promise<void> {
     return;
   }
   let validated: Record<string, unknown>;
-  try { validated = validateOperation(method, await readOperationParams()); }
+  try { validated = validateOperation(method, applyCliVm(method, await readOperationParams())); }
   catch (error) { writeCliResult(cliException(error)); process.exitCode = 2; return; }
-  if (cli.imageOut && method !== "screen_capture" && method !== "window_capture") {
+  if (cli.imageOut && method !== "screen_capture" && method !== "window_capture" && method !== "qemu_screen_capture") {
     writeCliResult(cliError("CLI_IMAGE_UNAVAILABLE", "--image-out is supported only by screen_capture and window_capture."));
     process.exitCode = 2;
     return;
@@ -306,7 +306,7 @@ async function runRpc(): Promise<void> {
       }
       activeId = request.id;
       try {
-        const params = validateOperation(request.method, request.params);
+        const params = validateOperation(request.method, applyCliVm(request.method, request.params));
         const response = await executeCliOperation(client, request.method, params, transfers);
         writeRpc({ kind: "response", id: request.id, result: response.result, ...(response.image ? { image: response.image } : {}) });
       } catch (error) {
@@ -379,6 +379,12 @@ async function executeCliOperation(
   }
   const timeoutMs = brokerTimeout(method, params);
   return await client.request(method, params, timeoutMs === undefined ? {} : { timeoutMs });
+}
+
+function applyCliVm(method: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (!cli.vmId) return params;
+  if (!method.startsWith("qemu_")) throw new Error("CLI_VM_ROUTING_UNAVAILABLE: --vm currently targets QEMU operations only; normal Windows guest operations use the guest's outbound TCP broker connection.");
+  return params.vm_id === undefined ? { ...params, vm_id: cli.vmId } : params;
 }
 
 function isStatefulOneShot(method: string, params: Record<string, unknown>): boolean {
@@ -496,8 +502,12 @@ Network and configuration options:
   --broker-host <ip>  Broker control host for MCP (default: 127.0.0.1)
   --broker-port <port> Broker control port for MCP (default: 9899)
   --upstream <ip:port> Transparently relay a connected guest to a normal upstream broker
+  --no-upstream        Ignore a persisted upstream target for this broker instance
   --config <file>     Load a broker JSON configuration file
   --state-dir <dir>   Store logs and artifacts in this directory
+  --qemu-root <dir>   Store managed QEMU VMs under this directory
+  --qemu-binary <path> Default qemu-system executable for managed VMs
+  --vm <id>           Supply vm_id for a QEMU operation (not normal guest tools)
 
 Examples:
   npx windows98-mcp
@@ -507,6 +517,8 @@ Examples:
   npx windows98-mcp call mouse_click --params '{"x":120,"y":80}'
   npx windows98-mcp call file_push --params '{"host_path":"C:\\work\\a.txt","guest_path":"C:\\MCPTEST\\a.txt"}'
   npx windows98-mcp call screen_capture --params '{}' --image-out screen.png
+  npx windows98-mcp call qemu_vm_list --params '{}'
+  npx windows98-mcp call qemu_doctor --params '{}'
   echo {"id":"1","method":"vm_status","params":{}} | npx windows98-mcp rpc
 
 Use "tools" for every method and its exact JSON schema. call is one-shot and

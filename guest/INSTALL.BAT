@@ -1,5 +1,31 @@
 @ECHO OFF
-ECHO This registers WIN98SUP for the current Windows user.
+ECHO Installing Windows 98 MCP guest files to C:\WIN98MCP...
+IF NOT EXIST C:\WIN98MCP\NUL MD C:\WIN98MCP
+COPY WIN98CTL.EXE C:\WIN98MCP\WIN98CTL.EXE >NUL
+IF ERRORLEVEL 1 GOTO COPYFAILED
+COPY WIN98SUP.EXE C:\WIN98MCP\WIN98SUP.EXE >NUL
+COPY WIN98CTL.INI C:\WIN98MCP\WIN98CTL.INI >NUL
+COPY RUNTEST.BAT C:\WIN98MCP\RUNTEST.BAT >NUL
+COPY UNINSTALL.BAT C:\WIN98MCP\UNINSTALL.BAT >NUL
+COPY README.TXT C:\WIN98MCP\README.TXT >NUL
+COPY COMPATIBILITY.TXT C:\WIN98MCP\COMPATIBILITY.TXT >NUL
+C:
+CD \WIN98MCP
+ECHO Registering WIN98SUP for the current Windows user...
 WIN98SUP.EXE --install
-ECHO WIN98SUP starts and recovers WIN98CTL automatically after login.
+IF ERRORLEVEL 1 GOTO REGISTERFAILED
+ECHO.
+ECHO Installation complete. Restart Windows normally.
+ECHO WIN98SUP will start WIN98CTL and recover it automatically after login.
+GOTO END
+:COPYFAILED
+ECHO.
+ECHO Installation failed while copying to C:\WIN98MCP.
+ECHO Close a running WIN98CTL or WIN98SUP and try again.
+GOTO END
+:REGISTERFAILED
+ECHO.
+ECHO Files were copied, but startup registration failed.
+ECHO Run C:\WIN98MCP\WIN98SUP.EXE --install after logging in normally.
+:END
 PAUSE

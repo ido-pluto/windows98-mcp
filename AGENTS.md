@@ -35,6 +35,10 @@
   Coordinate interactive UI work with other agents.
 - `vm_lock` and `vm_wait` matter only when an operator enables exclusive lock
   agents. In that mode, use the returned FIFO ticket after `VM_BUSY`.
+- For a managed QEMU VM, use `host=10.0.2.2` in `WIN98CTL.INI`; it is QEMU's
+  user-network host gateway. Do not use guest `127.0.0.1`. The QEMU profile
+  defaults include `kernel-irqchip=off,hpet=off,usb=off` and `auto` always has
+  an emulation fallback.
 
 ## Safe workflow rules
 
@@ -48,9 +52,9 @@
   is offline and reports guest/supervisor crash state when online.
 - Run `node dist/src/cli.js doctor` before live debugging and
   `node dist/src/cli.js smoke-test` after copying a new guest build.
-- The guest connection is deliberately unauthenticated for this isolated test
-  environment. Keep it on a private VMware host-only network and never expose
-  its TCP listener beyond that network.
+- The guest connection is deliberately unauthenticated for the isolated test
+  environment. Keep it on a trusted private network and never expose the
+  broker listener publicly. SMB/SMB1 is not used or required.
 
 ## CLI examples
 
@@ -77,4 +81,6 @@ npx windows98-mcp call show_message --params '{"message":"Control connection tes
 - Host: `npm run typecheck`, `npm test`, `npm run build`, and
   `npm audit --audit-level=moderate`.
 - Guest: `powershell -File scripts/build-guest.ps1 -Clean`.
-- VM package: `powershell -File scripts/stage-vm.ps1 -HostAddress <host-only-IP> -Port 9898`.
+- VM package: `powershell -File scripts/stage-vm.ps1` for QEMU user networking,
+  or pass `-HostAddress <reachable-broker-ip>` for VMware, bridged, or physical
+  Windows networking.

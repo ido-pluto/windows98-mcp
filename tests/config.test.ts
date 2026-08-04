@@ -42,6 +42,25 @@ describe("broker configuration", () => {
     expect(config.lockingEnabled).toBe(false);
   });
 
+  it("honors upstreamEnabled=false over a persisted upstream target", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-config-"));
+    roots.push(root);
+    const config = await loadBrokerConfig({
+      cwd: root,
+      env: { LOCALAPPDATA: root },
+      overrides: { upstreamEnabled: false },
+      // This simulates the persisted Admin-app state that previously leaked
+      // into a direct local QEMU broker.
+      configPath: await (async () => {
+        const file = path.join(root, "config.json");
+        await writeFile(file, JSON.stringify({ upstreamHost: "100.79.57.62", upstreamPort: 9898 }));
+        return file;
+      })()
+    });
+    expect(config.upstreamHost).toBeUndefined();
+    expect(config.upstreamPort).toBeUndefined();
+  });
+
   it("isolates non-default brokers by port while preserving the default shared pipe", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "win98-mcp-config-"));
     roots.push(root);
