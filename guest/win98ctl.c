@@ -16,7 +16,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.6.2"
+#define BUILD_ID "win98ctl-0.6.3"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768

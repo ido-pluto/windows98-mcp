@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BUILD_ID "win98sup-0.3.1"
+#define BUILD_ID "win98sup-0.3.2"
 #define ID_EXIT 2001
 #define SUP_TIMER 1
 #define RESTART_DELAY_MS 2000UL
@@ -61,9 +61,14 @@ static int tick_due(unsigned long now,unsigned long deadline) {
 static int heartbeat_is_fresh(unsigned long now) {
     FILE *f; unsigned long pid=0,sequence=0,tick=0,age; char build[64];
     f=fopen(g_heartbeat,"r");
-    if(!f)return 0;
+    /* WIN98CTL writes a compact local file with stdio.  Windows 9x does not
+       provide a dependable replace-existing rename primitive, so a supervisor
+       poll can occasionally see the file between truncate and close.  Keep
+       the last complete record; its agent tick still ages out after eight
+       seconds if the child really stopped. */
+    if(!f)return g_last_heartbeat_tick&&now-g_last_heartbeat_tick<=HEARTBEAT_TIMEOUT_MS;
     build[0]=0;
-    if(fscanf(f,"pid=%lu\nsequence=%lu\ntick=%lu\nbuild=%63s",&pid,&sequence,&tick,build)!=4){fclose(f);return 0;}
+    if(fscanf(f,"pid=%lu\nsequence=%lu\ntick=%lu\nbuild=%63s",&pid,&sequence,&tick,build)!=4){fclose(f);return g_last_heartbeat_tick&&now-g_last_heartbeat_tick<=HEARTBEAT_TIMEOUT_MS;}
     fclose(f);
     if(pid!=(unsigned long)g_child.dwProcessId)return 0;
     age=now-tick;

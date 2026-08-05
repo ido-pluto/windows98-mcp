@@ -27,7 +27,8 @@ writes MCPCRASH.LOG and stops that heartbeat; this remains true even when the
 Windows illegal-operation dialog leaves another agent thread alive. The
 supervisor checks the heartbeat every 250 ms and restarts only its owned child
 when the heartbeat is missing or older than eight seconds. Network or broker
-outages do not trigger this watchdog. Use the supervisor window's Exit
+outages do not trigger this watchdog. The supervisor tolerates a transient
+in-progress heartbeat-file write and uses the last complete record. Use the supervisor window's Exit
 supervisor button for an intentional stop.
 
 IMPORTANT
