@@ -16,7 +16,7 @@
 #include <io.h>
 #include "protocol.h"
 
-#define BUILD_ID "win98ctl-0.6.1"
+#define BUILD_ID "win98ctl-0.6.2"
 #define MAX_SESSIONS 8
 #define MAX_TRANSFERS 4
 #define IO_CHUNK 32768
@@ -121,8 +121,18 @@ static int control_cancelled;
 static int control_aborted;
 static int control_dead;
 static HANDLE agent_stop_event;
+/*
+ * A Windows 9x application-error dialog can leave other process threads
+ * runnable while the faulting thread is stopped.  The supervisor must not be
+ * kept alive by a heartbeat from such a damaged process.  The unhandled
+ * exception filter therefore signals this event before normal Windows fault
+ * handling displays its dialog; the heartbeat thread then stops immediately.
+ */
+static HANDLE agent_fault_event;
 static HANDLE agent_worker_thread;
 static HANDLE agent_heartbeat_thread;
+static HANDLE agent_fault_test_thread;
+static volatile LONG agent_faulted;
 static CRITICAL_SECTION agent_status_lock;
 static CRITICAL_SECTION agent_socket_lock;
 static CRITICAL_SECTION agent_log_lock;
@@ -134,6 +144,8 @@ static HWND agent_status_window;
 static HWND agent_close_button;
 static int agent_ui_stopping;
 static int agent_heartbeat_test;
+static int agent_fault_after_heartbeat_test;
+static int agent_fault_signal_after_heartbeat_test;
 static char last_request_id[128];
 static char last_request_method[128];
 static int last_request_active;
@@ -143,13 +155,19 @@ static int cooperative_sleep(unsigned long milliseconds);
 static int agent_stop_requested(void);
 static void set_agent_status(const char*text);
 
+static void mark_agent_faulted(void) {
+    InterlockedExchange(&agent_faulted,1);
+    /* SetEvent is deliberately the only synchronization used by the fault
+       path.  Do not acquire a lock here: the faulting thread may own it. */
+    if(agent_fault_event)SetEvent(agent_fault_event);
+}
 static void write_crash_record(EXCEPTION_POINTERS *info) {
     HANDLE f;DWORD written;char line[768];unsigned long code=0,address=0;
     if(info&&info->ExceptionRecord){code=info->ExceptionRecord->ExceptionCode;address=(unsigned long)info->ExceptionRecord->ExceptionAddress;}
-    _snprintf(line,sizeof(line),"build=%s\r\nexceptionCode=0x%08lX\r\nexceptionAddress=0x%08lX\r\nlastRequestId=%s\r\nlastMethod=%s\r\nlastRequestActive=%s\r\n",BUILD_ID,code,address,last_request_id,last_request_method,last_request_active?"true":"false");line[sizeof(line)-1]=0;
+    _snprintf(line,sizeof(line),"build=%s\r\npid=%lu\r\nexceptionCode=0x%08lX\r\nexceptionAddress=0x%08lX\r\nlastRequestId=%s\r\nlastMethod=%s\r\nlastRequestActive=%s\r\nfaultSignaled=true\r\n",BUILD_ID,(unsigned long)GetCurrentProcessId(),code,address,last_request_id,last_request_method,last_request_active?"true":"false");line[sizeof(line)-1]=0;
     f=CreateFileA(cfg.crash_path,GENERIC_WRITE,FILE_SHARE_READ,0,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,0);if(f!=INVALID_HANDLE_VALUE){WriteFile(f,line,strlen(line),&written,0);FlushFileBuffers(f);CloseHandle(f);}
 }
-static LONG WINAPI agent_unhandled_exception_filter(EXCEPTION_POINTERS *info) { write_crash_record(info);return EXCEPTION_CONTINUE_SEARCH; }
+static LONG WINAPI agent_unhandled_exception_filter(EXCEPTION_POINTERS *info) { mark_agent_faulted();write_crash_record(info);return EXCEPTION_CONTINUE_SEARCH; }
 static void set_last_operation(const char *request_id,const char *method) { strncpy(last_request_id,request_id?request_id:"",sizeof(last_request_id)-1);last_request_id[sizeof(last_request_id)-1]=0;strncpy(last_request_method,method?method:"",sizeof(last_request_method)-1);last_request_method[sizeof(last_request_method)-1]=0;last_request_active=1; }
 static void clear_last_operation(void) { last_request_id[0]=last_request_method[0]=0;last_request_active=0; }
 
@@ -176,6 +194,14 @@ static int wait_for_agent_stop(unsigned long milliseconds) {
     if(!agent_stop_event){Sleep(milliseconds);return 0;}
     return WaitForSingleObject(agent_stop_event,milliseconds)==WAIT_OBJECT_0;
 }
+static int wait_for_agent_stop_or_fault(unsigned long milliseconds) {
+    HANDLE events[2];DWORD result;unsigned long count=0;
+    if(agent_stop_event)events[count++]=agent_stop_event;
+    if(agent_fault_event)events[count++]=agent_fault_event;
+    if(!count){Sleep(milliseconds);return 0;}
+    result=WaitForMultipleObjects(count,events,FALSE,milliseconds);
+    return result!=WAIT_TIMEOUT;
+}
 static int write_heartbeat(unsigned long sequence) {
     FILE *f=fopen(cfg.heartbeat_path,"w");
     if(!f)return 0;
@@ -188,11 +214,30 @@ static DWORD WINAPI agent_heartbeat_thread_proc(LPVOID parameter) {
     (void)parameter;
     if(agent_heartbeat_test){log_line("heartbeat test requested; heartbeat intentionally withheld");return 0;}
     log_line("local heartbeat started (2 seconds)");
-    while(!agent_stop_requested()){
+    while(!agent_stop_requested()&&InterlockedCompareExchange(&agent_faulted,0,0)==0){
         sequence++;
         if(!write_heartbeat(sequence))log_line("heartbeat write failed");
-        if(wait_for_agent_stop(HEARTBEAT_INTERVAL_MS))break;
+        if(wait_for_agent_stop_or_fault(HEARTBEAT_INTERVAL_MS))break;
     }
+    return 0;
+}
+/* Test-only fixture: fault a non-heartbeat worker after the first heartbeat.
+   This models the Windows 98 dialog case that used to keep the supervisor
+   fooled indefinitely. */
+static DWORD WINAPI agent_fault_after_heartbeat_thread_proc(LPVOID parameter) {
+    (void)parameter;
+    if(wait_for_agent_stop_or_fault(3500UL))return 0;
+    {volatile int *fault=(volatile int*)0;*fault=1;}
+    return 0;
+}
+/* Test-only fixture for the Windows 98 error-dialog state: mark the process
+   faulted but deliberately leave it alive.  The supervisor must kill it after
+   the last heartbeat ages out. */
+static DWORD WINAPI agent_fault_signal_after_heartbeat_thread_proc(LPVOID parameter) {
+    (void)parameter;
+    if(wait_for_agent_stop_or_fault(3500UL))return 0;
+    log_line("fault signal test requested; stopping heartbeat without exiting");
+    mark_agent_faulted();
     return 0;
 }
 static void set_agent_status(const char*text) {
@@ -930,10 +975,14 @@ int WINAPI WinMain(HINSTANCE hi,HINSTANCE prev,LPSTR cmd,int show) {
     if(strstr(cmd,"--self-test"))return self_test();
     if(strstr(cmd,"--fault-test")){volatile int *fault=(volatile int*)0;log_line("intentional fault-test requested");*fault=1;}
     agent_heartbeat_test=strstr(cmd,"--heartbeat-test")!=0;
+    agent_fault_after_heartbeat_test=strstr(cmd,"--fault-after-heartbeat-test")!=0;
+    agent_fault_signal_after_heartbeat_test=strstr(cmd,"--fault-signal-after-heartbeat-test")!=0;
     mutex=CreateMutexA(0,FALSE,"WIN98CTL_AGENT_SINGLE_INSTANCE");if(!mutex)return 3;if(GetLastError()==ERROR_ALREADY_EXISTS){log_line("second instance ignored; existing agent owns the reconnect loop");MessageBoxA(0,"WIN98CTL is already running.","WIN98CTL",MB_OK|MB_ICONINFORMATION);CloseHandle(mutex);return 3;}
-    InitializeCriticalSection(&agent_status_lock);InitializeCriticalSection(&agent_socket_lock);InitializeCriticalSection(&agent_log_lock);agent_log_lock_initialized=1;agent_stop_event=CreateEventA(0,TRUE,FALSE,0);if(!agent_stop_event){agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 4;}
-    hwnd=create_agent_window(hi,show);if(!hwnd){CloseHandle(agent_stop_event);agent_stop_event=0;agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 5;}
+    InitializeCriticalSection(&agent_status_lock);InitializeCriticalSection(&agent_socket_lock);InitializeCriticalSection(&agent_log_lock);agent_log_lock_initialized=1;agent_stop_event=CreateEventA(0,TRUE,FALSE,0);agent_fault_event=CreateEventA(0,TRUE,FALSE,0);if(!agent_stop_event||!agent_fault_event){if(agent_stop_event)CloseHandle(agent_stop_event);if(agent_fault_event)CloseHandle(agent_fault_event);agent_stop_event=agent_fault_event=0;agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 4;}
+    hwnd=create_agent_window(hi,show);if(!hwnd){CloseHandle(agent_fault_event);agent_fault_event=0;CloseHandle(agent_stop_event);agent_stop_event=0;agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);CloseHandle(mutex);return 5;}
     agent_heartbeat_thread=CreateThread(0,0,agent_heartbeat_thread_proc,0,0,&thread_id);if(!agent_heartbeat_thread)set_agent_status("Could not start the heartbeat worker.");
     agent_worker_thread=CreateThread(0,0,agent_network_thread,0,0,&thread_id);if(!agent_worker_thread)set_agent_status("Could not start the network worker.");
-    while((message_result=GetMessageA(&message,0,0,0))>0){TranslateMessage(&message);DispatchMessageA(&message);}if(agent_stop_event)SetEvent(agent_stop_event);interrupt_agent_socket();if(agent_worker_thread){WaitForSingleObject(agent_worker_thread,20000);CloseHandle(agent_worker_thread);agent_worker_thread=0;}if(agent_heartbeat_thread){WaitForSingleObject(agent_heartbeat_thread,5000);CloseHandle(agent_heartbeat_thread);agent_heartbeat_thread=0;}if(agent_stop_event){CloseHandle(agent_stop_event);agent_stop_event=0;}DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);CloseHandle(mutex);if(log_file){fclose(log_file);log_file=0;}return message_result<0?6:0;
+    if(agent_fault_after_heartbeat_test){agent_fault_test_thread=CreateThread(0,0,agent_fault_after_heartbeat_thread_proc,0,0,&thread_id);if(!agent_fault_test_thread)set_agent_status("Could not start the fault test worker.");}
+    else if(agent_fault_signal_after_heartbeat_test){agent_fault_test_thread=CreateThread(0,0,agent_fault_signal_after_heartbeat_thread_proc,0,0,&thread_id);if(!agent_fault_test_thread)set_agent_status("Could not start the fault signal test worker.");}
+    while((message_result=GetMessageA(&message,0,0,0))>0){TranslateMessage(&message);DispatchMessageA(&message);}if(agent_stop_event)SetEvent(agent_stop_event);interrupt_agent_socket();if(agent_fault_test_thread){WaitForSingleObject(agent_fault_test_thread,5000);CloseHandle(agent_fault_test_thread);agent_fault_test_thread=0;}if(agent_worker_thread){WaitForSingleObject(agent_worker_thread,20000);CloseHandle(agent_worker_thread);agent_worker_thread=0;}if(agent_heartbeat_thread){WaitForSingleObject(agent_heartbeat_thread,5000);CloseHandle(agent_heartbeat_thread);agent_heartbeat_thread=0;}if(agent_fault_event){CloseHandle(agent_fault_event);agent_fault_event=0;}if(agent_stop_event){CloseHandle(agent_stop_event);agent_stop_event=0;}DeleteCriticalSection(&agent_socket_lock);DeleteCriticalSection(&agent_status_lock);agent_log_lock_initialized=0;DeleteCriticalSection(&agent_log_lock);CloseHandle(mutex);if(log_file){fclose(log_file);log_file=0;}return message_result<0?6:0;
 }

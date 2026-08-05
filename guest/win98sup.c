@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define BUILD_ID "win98sup-0.3.0"
+#define BUILD_ID "win98sup-0.3.1"
 #define ID_EXIT 2001
 #define SUP_TIMER 1
 #define RESTART_DELAY_MS 2000UL
@@ -21,6 +21,8 @@ static PROCESS_INFORMATION g_child;
 static int g_child_running;
 static int g_stopping;
 static int g_heartbeat_test;
+static int g_fault_test;
+static int g_fault_signal_test;
 static int g_heartbeat_kill;
 static unsigned long g_restart_count;
 static unsigned long g_restart_due;
@@ -71,13 +73,13 @@ static int heartbeat_is_fresh(unsigned long now) {
     return age<=HEARTBEAT_TIMEOUT_MS;
 }
 static int start_agent(void) {
-    STARTUPINFOA si; char command[MAX_PATH+48];
+    STARTUPINFOA si; char command[MAX_PATH+96];
     if(GetFileAttributesA(g_agent)==0xffffffffUL){set_status("WIN98CTL.EXE is missing");log_line("WIN98CTL.EXE is missing; retrying");return 0;}
     DeleteFileA(g_heartbeat);
     memset(&si,0,sizeof(si)); memset(&g_child,0,sizeof(g_child)); si.cb=sizeof(si);
-    _snprintf(command,sizeof(command),"\"%s\" --supervised%s",g_agent,g_heartbeat_test?" --heartbeat-test":""); command[sizeof(command)-1]=0;
+    _snprintf(command,sizeof(command),"\"%s\" --supervised%s%s%s",g_agent,g_heartbeat_test?" --heartbeat-test":"",g_fault_test?" --fault-after-heartbeat-test":"",g_fault_signal_test?" --fault-signal-after-heartbeat-test":""); command[sizeof(command)-1]=0;
     if(!CreateProcessA(0,command,0,0,FALSE,0,0,g_dir,&si,&g_child)){char line[160];_snprintf(line,sizeof(line),"CreateProcessA failed (error %lu)",(unsigned long)GetLastError());line[sizeof(line)-1]=0;log_line(line);set_status("Could not start WIN98CTL; retrying");return 0;}
-    g_child_running=1;g_heartbeat_kill=0;g_heartbeat_start_deadline=GetTickCount()+HEARTBEAT_TIMEOUT_MS;g_last_heartbeat_sequence=0;g_last_persisted_heartbeat_sequence=0;g_last_heartbeat_tick=0;g_last_heartbeat_age=0xffffffffUL;g_restart_count++;g_heartbeat_test=0;set_status("WIN98CTL running");log_line("started WIN98CTL supervised child; waiting for local heartbeat");return 1;
+    g_child_running=1;g_heartbeat_kill=0;g_heartbeat_start_deadline=GetTickCount()+HEARTBEAT_TIMEOUT_MS;g_last_heartbeat_sequence=0;g_last_persisted_heartbeat_sequence=0;g_last_heartbeat_tick=0;g_last_heartbeat_age=0xffffffffUL;g_restart_count++;g_heartbeat_test=0;g_fault_test=0;g_fault_signal_test=0;set_status("WIN98CTL running");log_line("started WIN98CTL supervised child; waiting for local heartbeat");return 1;
 }
 static void stop_child(void) {
     if(!g_child_running)return;
@@ -142,6 +144,8 @@ int WINAPI WinMain(HINSTANCE instance,HINSTANCE previous,LPSTR command,int show)
     _snprintf(g_agent,sizeof(g_agent),"%s\\WIN98CTL.EXE",g_dir);_snprintf(g_log,sizeof(g_log),"%s\\MCPSUPERVISOR.LOG",g_dir);_snprintf(g_state,sizeof(g_state),"%s\\MCPSUPERVISOR.TXT",g_dir);_snprintf(g_heartbeat,sizeof(g_heartbeat),"%s\\MCPHEARTBEAT.TXT",g_dir);
     if(strstr(command,"--self-test")){FILE*f=fopen(g_state,"w");if(!f)return 1;fprintf(f,"state=Supervisor self-test PASS\r\nbuild=%s\r\n",BUILD_ID);fclose(f);return GetFileAttributesA(g_agent)==0xffffffffUL?1:0;}
     g_heartbeat_test=strstr(command,"--heartbeat-test")!=0;
+    g_fault_test=strstr(command,"--fault-test")!=0;
+    g_fault_signal_test=strstr(command,"--fault-signal-test")!=0;
     g_stop_event=CreateEventA(0,TRUE,FALSE,SUPERVISOR_STOP_EVENT);if(!g_stop_event)return 3;
     memset(&wc,0,sizeof(wc));wc.lpfnWndProc=window_proc;wc.hInstance=instance;wc.hIcon=LoadIconA(0,IDI_APPLICATION);wc.hCursor=LoadCursorA(0,IDC_ARROW);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);wc.lpszClassName="WIN98SUP_STATUS_WINDOW";
     if(!RegisterClassA(&wc)&&GetLastError()!=ERROR_CLASS_ALREADY_EXISTS){CloseHandle(g_stop_event);return 4;}

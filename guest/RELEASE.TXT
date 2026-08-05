@@ -19,8 +19,9 @@ This is the Windows 98 through Windows 10 guest component for windows98-mcp.
 The same 32-bit WIN98CTL.EXE runs on Windows 98 SE and Windows 10 (32-bit or
 x64 through WOW64). WIN98SUP.EXE is the login heartbeat watchdog: it restarts
 its owned agent after an unexpected exit or an eight-second stale local
-heartbeat. The heartbeat uses a dedicated agent thread, so transfers do not
-block it.
+heartbeat. If Windows shows an illegal-operation dialog, WIN98CTL records the
+fault and intentionally stops its heartbeat before the dialog is displayed, so
+WIN98SUP recovers it. Transfers do not block a healthy heartbeat.
 The guest always connects outbound to the host and retries every two seconds.
 Protocol v2 has no secrets, authentication, or encryption; use it only on an
 isolated VM network.

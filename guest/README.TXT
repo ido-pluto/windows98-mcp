@@ -22,10 +22,13 @@ user startup entries. It deliberately keeps this folder and its logs.
 
 The agent retries the outbound host connection every two seconds forever. It
 also writes a local PID-bound heartbeat every two seconds from a separate
-thread. The supervisor checks that heartbeat every 250 ms and restarts only
-its owned child when the heartbeat is missing or older than eight seconds.
-Network or broker outages do not trigger this watchdog. Use the supervisor
-window's Exit supervisor button for an intentional stop.
+thread. If an unhandled application exception reaches Windows, the agent first
+writes MCPCRASH.LOG and stops that heartbeat; this remains true even when the
+Windows illegal-operation dialog leaves another agent thread alive. The
+supervisor checks the heartbeat every 250 ms and restarts only its owned child
+when the heartbeat is missing or older than eight seconds. Network or broker
+outages do not trigger this watchdog. Use the supervisor window's Exit
+supervisor button for an intentional stop.
 
 IMPORTANT
 ---------
@@ -37,9 +40,10 @@ FILES TO RETURN AFTER A FAILURE
 -------------------------------
 Copy SELFTEST.TXT, MCPAGENT.LOG, MCPCRASH.LOG, MCPSUPERVISOR.LOG and
 MCPSUPERVISOR.TXT back to the host. MCPAGENT.LOG is bounded to 256 KiB; the
-prior generation is MCPAGENT.OLD. MCPCRASH.LOG records the exception and last
-in-flight request when the agent faults. The supervisor state records heartbeat
-age, sequence, and restart reason. For a one-time watchdog recovery check, run
+prior generation is MCPAGENT.OLD. MCPCRASH.LOG records the exception, process
+ID, fault signal, and last in-flight request when the agent faults. The
+supervisor state records heartbeat age, sequence, and restart reason. For a
+one-time watchdog recovery check, run
 WIN98SUP.EXE --heartbeat-test. It launches one child that withholds heartbeat,
 terminates it after eight seconds, then returns to a normal supervised agent.
 
